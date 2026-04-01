@@ -204,7 +204,7 @@ impl AgentAnnouncement {
             service_type,
             &self.agent_id,
             host_name,
-            self.addresses.clone(),
+            self.addresses.as_slice(),
             self.port,
             self.to_txt_properties(),
         )
@@ -216,24 +216,43 @@ impl AgentAnnouncement {
     /// # Errors
     /// Returns [`ZeroConfError`] when required TXT properties are missing or invalid.
     pub fn from_resolved_service(service: &ResolvedService) -> Result<Self, ZeroConfError> {
-        let metadata = metadata_from_txt_properties(service.get_properties())?;
-        let agent_id = required_metadata(&metadata, AGENT_ID_METADATA_KEY)?.to_owned();
-        let role = required_metadata(&metadata, AGENT_ROLE_METADATA_KEY)?.to_owned();
-        let project = required_metadata(&metadata, AGENT_PROJECT_METADATA_KEY)?.to_owned();
-        let status = required_metadata(&metadata, AGENT_STATUS_METADATA_KEY)?.parse()?;
         let addresses = service
             .get_addresses()
             .iter()
             .map(mdns_sd::ScopedIp::to_ip_addr)
             .collect();
 
-        Self::new(
+        Self::from_txt_properties(
             service.get_fullname(),
+            service.get_port(),
+            addresses,
+            service.get_properties(),
+        )
+    }
+
+    /// Creates an announcement from TXT properties collected from the network.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when required TXT properties are missing or invalid.
+    pub fn from_txt_properties(
+        instance_name: impl Into<String>,
+        port: u16,
+        addresses: Vec<IpAddr>,
+        properties: &TxtProperties,
+    ) -> Result<Self, ZeroConfError> {
+        let metadata = metadata_from_txt_properties(properties)?;
+        let agent_id = required_metadata(&metadata, AGENT_ID_METADATA_KEY)?.to_owned();
+        let role = required_metadata(&metadata, AGENT_ROLE_METADATA_KEY)?.to_owned();
+        let project = required_metadata(&metadata, AGENT_PROJECT_METADATA_KEY)?.to_owned();
+        let status = required_metadata(&metadata, AGENT_STATUS_METADATA_KEY)?.parse()?;
+
+        Self::new(
+            instance_name,
             agent_id,
             role,
             project,
             status,
-            service.get_port(),
+            port,
             addresses,
             metadata,
         )
@@ -384,12 +403,9 @@ fn required_metadata<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashSet,
-        net::{IpAddr, Ipv4Addr},
-    };
+    use std::net::{IpAddr, Ipv4Addr};
 
-    use mdns_sd::ScopedIp;
+    use mdns_sd::IntoTxtProperties;
 
     use super::*;
 
@@ -433,26 +449,23 @@ mod tests {
 
     #[test]
     fn agent_announcement_should_round_trip_from_resolved_service() {
-        let service = ResolvedService {
-            ty_domain: "_agent-mesh._tcp.local.".into(),
-            sub_ty_domain: None,
-            fullname: "agent-1._agent-mesh._tcp.local.".into(),
-            host: "agent-1.local.".into(),
-            port: 8080,
-            addresses: HashSet::from([ScopedIp::from(IpAddr::V4(Ipv4Addr::LOCALHOST))]),
-            txt_properties: TxtProperties::from(
-                &[
-                    ("agent_id", "agent-1"),
-                    ("role", "reviewer"),
-                    ("current_project", "alpha"),
-                    ("status", "busy"),
-                    ("capability", "review"),
-                ][..],
-            ),
-        };
+        let properties = [
+            ("agent_id", "agent-1"),
+            ("role", "reviewer"),
+            ("current_project", "alpha"),
+            ("status", "busy"),
+            ("capability", "review"),
+        ]
+        .as_slice()
+        .into_txt_properties();
 
-        let announcement = AgentAnnouncement::from_resolved_service(&service)
-            .expect("resolved service should parse");
+        let announcement = AgentAnnouncement::from_txt_properties(
+            "agent-1._agent-mesh._tcp.local.",
+            8080,
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            &properties,
+        )
+        .expect("TXT properties should parse");
 
         assert_eq!(announcement.agent_id(), "agent-1");
         assert_eq!(announcement.role(), "reviewer");
@@ -466,24 +479,21 @@ mod tests {
 
     #[test]
     fn agent_announcement_should_reject_missing_required_txt_property() {
-        let service = ResolvedService {
-            ty_domain: "_agent-mesh._tcp.local.".into(),
-            sub_ty_domain: None,
-            fullname: "agent-1._agent-mesh._tcp.local.".into(),
-            host: "agent-1.local.".into(),
-            port: 8080,
-            addresses: HashSet::from([ScopedIp::from(IpAddr::V4(Ipv4Addr::LOCALHOST))]),
-            txt_properties: TxtProperties::from(
-                &[
-                    ("agent_id", "agent-1"),
-                    ("role", "reviewer"),
-                    ("status", "busy"),
-                ][..],
-            ),
-        };
+        let properties = [
+            ("agent_id", "agent-1"),
+            ("role", "reviewer"),
+            ("status", "busy"),
+        ]
+        .as_slice()
+        .into_txt_properties();
 
-        let err = AgentAnnouncement::from_resolved_service(&service)
-            .expect_err("missing current_project should fail");
+        let err = AgentAnnouncement::from_txt_properties(
+            "agent-1._agent-mesh._tcp.local.",
+            8080,
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            &properties,
+        )
+        .expect_err("missing current_project should fail");
 
         assert!(matches!(
             err,

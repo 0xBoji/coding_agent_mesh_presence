@@ -4,10 +4,10 @@
 Build `zero-conf-mesh`, a Rust crate for zero-configuration LAN service discovery for multi-agent systems using mDNS/DNS-SD.
 
 ## Current repository state
-This repository is currently **spec-first**.
-- The main source of truth is `docs/specs.md`.
-- There is **no crate scaffold yet** (`Cargo.toml`, `src/`, and tests are not present yet).
-- Before implementing code, read and align with `docs/specs.md`.
+This repository is now **scaffolded** and follows a **spec-first** approach.
+- The main source of truth remains `docs/specs.md`.
+- The crate scaffold (`Cargo.toml`, `src/`) is initialized.
+- All code follows the repository specifications.
 
 ## Source of truth
 When making decisions, use this order:
@@ -59,7 +59,7 @@ For any non-trivial code change, aim to cover:
 Avoid flaky tests that depend on fragile host-network assumptions unless explicitly requested.
 
 ## Working rules for agents
-- Make small, reviewable changes.
+- Make small, reviewable changes following **Conventional Commits** (e.g., `feat:`, `fix:`, `chore:`).
 - Do not invent features outside the scope of `docs/specs.md` unless asked.
 - Preserve backward-compatible API evolution where possible.
 - Add or update docs when behavior changes.

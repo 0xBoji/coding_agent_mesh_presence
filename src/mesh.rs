@@ -3,32 +3,50 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use mdns_sd::ServiceDaemon;
 use tokio::{
     sync::{RwLock, watch},
     task::JoinHandle,
     time,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{
+    broadcaster::Broadcaster,
     builder::ZeroConfMeshBuilder,
     config::ZeroConfConfig,
     error::ZeroConfError,
     events::AgentEvent,
+    listener::Listener,
     registry::Registry,
     types::{AgentAnnouncement, AgentStatus},
 };
 
 /// High-level runtime handle for the local mesh node.
-#[derive(Debug)]
 pub struct ZeroConfMesh {
     config: ZeroConfConfig,
     registry: Registry,
     local_agent: std::sync::Arc<RwLock<AgentAnnouncement>>,
+    broadcaster: Broadcaster,
+    daemon: ServiceDaemon,
     shutdown_tx: watch::Sender<bool>,
     heartbeat_task: Mutex<Option<JoinHandle<()>>>,
     sweeper_task: Mutex<Option<JoinHandle<()>>>,
+    listener_task: Mutex<Option<JoinHandle<()>>>,
     shutdown_requested: AtomicBool,
+}
+
+impl std::fmt::Debug for ZeroConfMesh {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZeroConfMesh")
+            .field("config", &self.config)
+            .field("registry", &self.registry)
+            .field(
+                "shutdown_requested",
+                &self.shutdown_requested.load(Ordering::Acquire),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl ZeroConfMesh {
@@ -46,25 +64,44 @@ impl ZeroConfMesh {
         let registry = Registry::new(config.ttl());
         let local_announcement = config.local_announcement()?;
         let local_agent = std::sync::Arc::new(RwLock::new(local_announcement.clone()));
-        registry.upsert(local_announcement).await;
+        let daemon = ServiceDaemon::new_with_port(config.mdns_port())?;
+        let broadcaster =
+            Broadcaster::new(daemon.clone(), config.service_type(), config.host_name());
+
+        broadcaster.announce(&local_announcement)?;
+        registry.upsert_local(local_announcement).await;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let heartbeat_task = spawn_heartbeat_task(
             registry.clone(),
             local_agent.clone(),
+            broadcaster.clone(),
             config.heartbeat_interval(),
             shutdown_rx.clone(),
         );
-        let sweeper_task =
-            spawn_sweeper_task(registry.clone(), config.heartbeat_interval(), shutdown_rx);
+        let sweeper_task = spawn_sweeper_task(
+            registry.clone(),
+            config.heartbeat_interval(),
+            shutdown_rx.clone(),
+        );
+        let listener_task = Listener::new(
+            daemon.clone(),
+            config.service_type(),
+            config.agent_id(),
+            config.instance_name(),
+        )
+        .spawn(registry.clone(), shutdown_rx)?;
 
         Ok(Self {
             config,
             registry,
             local_agent,
+            broadcaster,
+            daemon,
             shutdown_tx,
             heartbeat_task: Mutex::new(Some(heartbeat_task)),
             sweeper_task: Mutex::new(Some(sweeper_task)),
+            listener_task: Mutex::new(Some(listener_task)),
             shutdown_requested: AtomicBool::new(false),
         })
     }
@@ -79,6 +116,32 @@ impl ZeroConfMesh {
     #[must_use]
     pub const fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// Returns the local agent identifier.
+    #[must_use]
+    pub fn local_agent_id(&self) -> &str {
+        self.config.agent_id()
+    }
+
+    /// Returns a snapshot of the local agent announcement.
+    pub async fn local_agent(&self) -> AgentAnnouncement {
+        self.local_agent.read().await.clone()
+    }
+
+    /// Returns a single agent by identifier from the registry.
+    pub async fn get_agent(&self, agent_id: &str) -> Option<crate::types::AgentInfo> {
+        self.registry.get(agent_id).await
+    }
+
+    /// Returns all known agents from the registry.
+    pub async fn agents(&self) -> Vec<crate::types::AgentInfo> {
+        self.registry.list().await
+    }
+
+    /// Returns all known agents for a specific project namespace.
+    pub async fn agents_by_project(&self, project: &str) -> Vec<crate::types::AgentInfo> {
+        self.registry.get_all_by_project(project).await
     }
 
     /// Subscribes to registry lifecycle events.
@@ -112,11 +175,16 @@ impl ZeroConfMesh {
         }
 
         let _ = self.shutdown_tx.send(true);
-        let local_agent_id = {
-            let local_agent = self.local_agent.read().await;
-            local_agent.agent_id().to_owned()
-        };
-        let _ = self.registry.remove(&local_agent_id).await;
+        let local_announcement = self.local_agent.read().await.clone();
+
+        if let Err(error) = self.broadcaster.unregister(&local_announcement).await {
+            warn!(?error, "failed to unregister local service");
+        }
+
+        let _ = self
+            .registry
+            .remove_local(local_announcement.agent_id())
+            .await;
 
         if let Some(handle) = take_task(&self.heartbeat_task) {
             handle.await?;
@@ -126,12 +194,19 @@ impl ZeroConfMesh {
             handle.await?;
         }
 
+        if let Some(handle) = take_task(&self.listener_task) {
+            handle.await?;
+        }
+
+        let _ = self.daemon.shutdown();
+
         Ok(())
     }
 
     async fn refresh_local_agent(&self) -> Result<(), ZeroConfError> {
         let announcement = self.local_agent.read().await.clone();
-        self.registry.upsert(announcement).await;
+        self.broadcaster.announce(&announcement)?;
+        self.registry.upsert_local(announcement).await;
         Ok(())
     }
 }
@@ -155,12 +230,21 @@ impl Drop for ZeroConfMesh {
         {
             handle.abort();
         }
+
+        if let Ok(mut handle) = self.listener_task.lock()
+            && let Some(handle) = handle.take()
+        {
+            handle.abort();
+        }
+
+        let _ = self.daemon.shutdown();
     }
 }
 
 fn spawn_heartbeat_task(
     registry: Registry,
     local_agent: std::sync::Arc<RwLock<AgentAnnouncement>>,
+    broadcaster: Broadcaster,
     heartbeat_interval: std::time::Duration,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
@@ -173,6 +257,9 @@ fn spawn_heartbeat_task(
                 _ = shutdown_rx.changed() => break,
                 _ = interval.tick() => {
                     let announcement = local_agent.read().await.clone();
+                    if let Err(error) = broadcaster.announce(&announcement) {
+                        warn!(?error, "failed to re-announce local service");
+                    }
                     let _ = registry.upsert(announcement).await;
                 }
             }
@@ -209,7 +296,10 @@ fn take_task(task: &Mutex<Option<JoinHandle<()>>>) -> Option<JoinHandle<()>> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        net::{Ipv4Addr, UdpSocket},
+        time::Duration,
+    };
 
     use tokio::time;
 
@@ -222,6 +312,7 @@ mod tests {
             .role("coder")
             .project("alpha")
             .port(8080)
+            .mdns_port(available_udp_port())
             .heartbeat_interval(Duration::from_secs(30))
             .ttl(Duration::from_secs(120))
             .build()
@@ -243,12 +334,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mesh_should_expose_high_level_agent_queries() {
+        let mesh = ZeroConfMesh::builder()
+            .agent_id("agent-1")
+            .role("coder")
+            .project("alpha")
+            .port(8080)
+            .mdns_port(available_udp_port())
+            .build()
+            .await
+            .expect("mesh should build");
+
+        let local = mesh.local_agent().await;
+        let agents = mesh.agents().await;
+        let alpha = mesh.agents_by_project("alpha").await;
+
+        assert_eq!(mesh.local_agent_id(), "agent-1");
+        assert_eq!(local.agent_id(), "agent-1");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(alpha.len(), 1);
+
+        mesh.shutdown().await.expect("shutdown should succeed");
+    }
+
+    #[tokio::test]
     async fn mesh_shutdown_should_remove_local_agent() {
         let mesh = ZeroConfMesh::builder()
             .agent_id("agent-1")
             .role("coder")
             .project("alpha")
             .port(8080)
+            .mdns_port(available_udp_port())
             .build()
             .await
             .expect("mesh should build");
@@ -258,5 +374,65 @@ mod tests {
         time::sleep(Duration::from_millis(10)).await;
         let agent = mesh.registry().get("agent-1").await;
         assert!(agent.is_none());
+    }
+
+    #[tokio::test]
+    async fn mesh_should_discover_peer_on_custom_mdns_port() {
+        let mdns_port = available_udp_port();
+        let mesh_a = ZeroConfMesh::builder()
+            .agent_id("agent-a")
+            .role("coder")
+            .project("alpha")
+            .port(8081)
+            .mdns_port(mdns_port)
+            .heartbeat_interval(Duration::from_millis(200))
+            .ttl(Duration::from_secs(2))
+            .build()
+            .await
+            .expect("mesh a should build");
+
+        let mesh_b = ZeroConfMesh::builder()
+            .agent_id("agent-b")
+            .role("reviewer")
+            .project("alpha")
+            .port(8082)
+            .mdns_port(mdns_port)
+            .heartbeat_interval(Duration::from_millis(200))
+            .ttl(Duration::from_secs(2))
+            .build()
+            .await
+            .expect("mesh b should build");
+
+        let deadline = time::Instant::now() + Duration::from_secs(5);
+        let mut discovered = false;
+        while time::Instant::now() < deadline {
+            if mesh_a.registry().get("agent-b").await.is_some()
+                && mesh_b.registry().get("agent-a").await.is_some()
+            {
+                discovered = true;
+                break;
+            }
+
+            time::sleep(Duration::from_millis(100)).await;
+        }
+
+        mesh_a
+            .shutdown()
+            .await
+            .expect("mesh a shutdown should succeed");
+        mesh_b
+            .shutdown()
+            .await
+            .expect("mesh b shutdown should succeed");
+
+        assert!(discovered, "both peers should discover each other");
+    }
+
+    fn available_udp_port() -> u16 {
+        UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .expect("ephemeral UDP port should be allocated")
+            .local_addr()
+            .expect("local address should be available")
+            .port()
     }
 }

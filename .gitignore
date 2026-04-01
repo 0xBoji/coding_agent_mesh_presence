@@ -1,9 +1,5 @@
 target/
 
-# local agent/runtime tooling
-.omx/
-.codex/
-.agents/
 
 # editor / OS noise
 .DS_Store

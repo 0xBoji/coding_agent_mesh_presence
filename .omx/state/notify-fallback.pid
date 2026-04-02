@@ -1,8 +1,8 @@
 {
-  "pid": 66489,
-  "parent_pid": 66165,
+  "pid": 92137,
+  "parent_pid": 92103,
   "cwd": "/Volumes/0xbojissd/learn/rust/zero-conf-mesh",
-  "started_at": "2026-04-01T19:22:42.044Z",
+  "started_at": "2026-04-02T04:28:30.094Z",
   "max_lifetime_ms": 21600000,
-  "owner_token": "66489-1775071362044-rucrubas"
+  "owner_token": "92137-1775104110094-10irurzw"
 }

@@ -5,7 +5,7 @@ Zero-configuration LAN service discovery for multi-agent systems in Rust using m
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](#installation)
 [![crates.io](https://img.shields.io/crates/v/coding_agent_mesh_presence.svg)](https://crates.io/crates/coding_agent_mesh_presence)
-[![CI](https://github.com/0xBoji/zero-conf-mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/0xBoji/zero-conf-mesh/actions/workflows/ci.yml)
+[![CI](https://github.com/0xBoji/coding_agent_mesh_presence/actions/workflows/ci.yml/badge.svg)](https://github.com/0xBoji/coding_agent_mesh_presence/actions/workflows/ci.yml)
 
 > Think of `coding_agent_mesh_presence` as a small local-network presence layer for agents and tools:
 > each node advertises who it is, what project/branch it belongs to, and what it is doing right now,

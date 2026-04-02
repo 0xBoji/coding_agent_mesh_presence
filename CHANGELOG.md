@@ -16,7 +16,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 - `.camp.toml` and `camp.toml` are now ignored by git so machine-local mesh identities stay local.
 
-## [0.1.4](https://github.com/0xBoji/zero-conf-mesh/compare/v0.1.3...v0.1.4) - 2026-04-02
+## [0.1.4](https://github.com/0xBoji/coding_agent_mesh_presence/compare/v0.1.3...v0.1.4) - 2026-04-02
 
 ### Added
 
@@ -24,7 +24,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - add local rest bridge to camp
 - add exec hooks to camp watch
 
-## [0.1.3](https://github.com/0xBoji/zero-conf-mesh/compare/v0.1.2...v0.1.3) - 2026-04-02
+## [0.1.3](https://github.com/0xBoji/coding_agent_mesh_presence/compare/v0.1.2...v0.1.3) - 2026-04-02
 
 ### Added
 
@@ -62,13 +62,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - CLI JSONL event-log helper coverage.
 - CLI exec-hook stdin coverage.
 
-## [0.1.2](https://github.com/0xBoji/zero-conf-mesh/compare/v0.1.1...v0.1.2) - 2026-04-02
+## [0.1.2](https://github.com/0xBoji/coding_agent_mesh_presence/compare/v0.1.1...v0.1.2) - 2026-04-02
 
 ### Other
 
 - add crates.io badge to README
 
-## [0.1.1](https://github.com/0xBoji/zero-conf-mesh/compare/v0.1.0...v0.1.1) - 2026-04-02
+## [0.1.1](https://github.com/0xBoji/coding_agent_mesh_presence/compare/v0.1.0...v0.1.1) - 2026-04-02
 
 ### Other
 

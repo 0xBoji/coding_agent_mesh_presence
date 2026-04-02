@@ -506,6 +506,7 @@ So `mes` gives you a text-first interface over the same discovery engine.
 - `mes who`
 - `mes get`
 - `mes watch`
+- `mes serve`
 - `mes completions`
 
 ### `mes announce`
@@ -650,6 +651,30 @@ mes completions fish
 ```
 
 This is especially handy if humans and agents share the same shell environment.
+
+### `mes serve`
+
+If you have Python/TypeScript agents that prefer HTTP over shell parsing, you can start a local REST bridge:
+
+```bash
+mes serve --bind 127.0.0.1:9999
+```
+
+Current endpoints:
+
+- `GET /health`
+- `GET /agents`
+- `GET /agents/{id}`
+
+Examples:
+
+```bash
+curl http://127.0.0.1:9999/health
+curl 'http://127.0.0.1:9999/agents?role=reviewer&project=alpha'
+curl http://127.0.0.1:9999/agents/qa-01
+```
+
+Like the other query-oriented commands, `mes serve` runs on top of a discovery-only observer so the bridge itself does not pollute the mesh registry.
 
 ### Shared-secret support in the CLI
 

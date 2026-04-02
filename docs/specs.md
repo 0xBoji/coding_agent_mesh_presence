@@ -92,6 +92,7 @@ It also supports:
 - `who` as a human/agent-friendly alias for `list`,
 - append-only JSONL event export,
 - shell-command hooks fed by JSON over stdin,
+- a local REST bridge for non-shell agent runtimes,
 - shell completion generation.
 
 ## 4. Data Model

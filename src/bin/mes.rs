@@ -12,12 +12,20 @@ use std::{
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 
+use axum::{
+    Json, Router,
+    extract::{Path as AxumPath, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::get,
+};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::time;
 use zero_conf_mesh::{
     AgentEvent, AgentInfo, AgentStatus, DepartureReason, EventOrigin, NetworkInterface,
@@ -42,6 +50,8 @@ enum Command {
     Get(GetCommand),
     /// Watch discovery events and print newline-delimited JSON.
     Watch(WatchCommand),
+    /// Start a local REST bridge for non-shell agent frameworks.
+    Serve(ServeCommand),
     /// Generate shell completion scripts for mes.
     Completions(CompletionsCommand),
 }
@@ -202,6 +212,15 @@ struct WatchCommand {
 }
 
 #[derive(Args, Debug)]
+struct ServeCommand {
+    #[command(flatten)]
+    discovery: DiscoveryOptions,
+    /// Bind address for the local HTTP bridge.
+    #[arg(long, default_value = "127.0.0.1:9999")]
+    bind: String,
+}
+
+#[derive(Args, Debug)]
 struct CompletionsCommand {
     /// Shell to generate completions for.
     #[arg(value_enum)]
@@ -240,6 +259,26 @@ struct SnapshotRecord {
     agents: Vec<AgentRecord>,
 }
 
+#[derive(Debug, Serialize)]
+struct HealthRecord {
+    ok: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentQuery {
+    id: Option<String>,
+    role: Option<String>,
+    project: Option<String>,
+    branch: Option<String>,
+    status: Option<String>,
+    capability: Option<String>,
+}
+
+#[derive(Clone)]
+struct ServeState {
+    mesh: Arc<ZeroConfMesh>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     print_banner();
@@ -250,6 +289,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Command::List(command) => run_list(command).await?,
         Command::Get(command) => run_get(command).await?,
         Command::Watch(command) => run_watch(command).await?,
+        Command::Serve(command) => run_serve(command).await?,
         Command::Completions(command) => run_completions(command)?,
     }
 
@@ -388,6 +428,32 @@ async fn run_watch(command: WatchCommand) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn run_serve(command: ServeCommand) -> Result<(), Box<dyn Error>> {
+    let bind_addr = command.bind.parse::<std::net::SocketAddr>()?;
+    let mesh = Arc::new(build_observer(&command.discovery).await?);
+    let state = ServeState {
+        mesh: Arc::clone(&mesh),
+    };
+
+    let app = Router::new()
+        .route("/health", get(health_handler))
+        .route("/agents", get(list_agents_handler))
+        .route("/agents/{id}", get(get_agent_handler))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    eprintln!("mes: serving local mesh bridge on http://{bind_addr}");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
+
+    mesh.shutdown().await?;
+    Ok(())
+}
+
 fn run_completions(command: CompletionsCommand) -> Result<(), Box<dyn Error>> {
     let mut cli = Cli::command();
     generate(command.shell, &mut cli, "mes", &mut std::io::stdout());
@@ -504,6 +570,41 @@ fn matches_filters(agent: &AgentInfo, command: &ListCommand) -> bool {
     true
 }
 
+fn matches_agent_query(agent: &AgentInfo, query: &AgentQuery) -> bool {
+    if let Some(id) = &query.id
+        && agent.id() != id
+    {
+        return false;
+    }
+    if let Some(role) = &query.role
+        && agent.role() != role
+    {
+        return false;
+    }
+    if let Some(project) = &query.project
+        && agent.project() != project
+    {
+        return false;
+    }
+    if let Some(branch) = &query.branch
+        && agent.branch() != branch
+    {
+        return false;
+    }
+    if let Some(status) = &query.status
+        && agent.status().as_str() != status
+    {
+        return false;
+    }
+    if let Some(capability) = &query.capability
+        && !agent.has_capability(capability)
+    {
+        return false;
+    }
+
+    true
+}
+
 fn apply_metadata(
     mut builder: zero_conf_mesh::ZeroConfMeshBuilder,
     metadata: Vec<(String, String)>,
@@ -606,6 +707,35 @@ fn reason_label(reason: DepartureReason) -> &'static str {
     match reason {
         DepartureReason::Graceful => "graceful",
         DepartureReason::Expired => "expired",
+    }
+}
+
+async fn health_handler() -> Json<HealthRecord> {
+    Json(HealthRecord { ok: true })
+}
+
+async fn list_agents_handler(
+    State(state): State<ServeState>,
+    Query(query): Query<AgentQuery>,
+) -> Json<Vec<AgentRecord>> {
+    let agents = state
+        .mesh
+        .agents()
+        .await
+        .into_iter()
+        .filter(|agent| matches_agent_query(agent, &query))
+        .map(|agent| to_agent_record(&agent))
+        .collect::<Vec<_>>();
+    Json(agents)
+}
+
+async fn get_agent_handler(
+    State(state): State<ServeState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    match state.mesh.get_agent(&id).await {
+        Some(agent) => (StatusCode::OK, Json(to_agent_record(&agent))).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

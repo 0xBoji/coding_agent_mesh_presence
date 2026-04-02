@@ -7,6 +7,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/0xBoji/coding_agent_mesh_presence/compare/v0.1.6...v0.1.7) - 2026-04-02
+
+### Other
+
+- sync installer banner with camp CLI banner
+- improve camp installation and docs structure
+
 ## [0.1.6](https://github.com/0xBoji/coding_agent_mesh_presence/compare/v0.1.5...v0.1.6) - 2026-04-02
 
 ### Other

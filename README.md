@@ -37,6 +37,7 @@ Zero-configuration LAN service discovery for multi-agent systems in Rust using m
 - [Failure modes and cleanup behavior](#failure-modes-and-cleanup-behavior)
 - [Limitations and non-goals](#limitations-and-non-goals)
 - [Testing and verification](#testing-and-verification)
+- [Release automation](#release-automation)
 - [Design notes](#design-notes)
 - [Publish readiness](#publish-readiness)
 - [Roadmap / likely next improvements](#roadmap--likely-next-improvements)
@@ -717,6 +718,36 @@ cargo package --locked
 ```
 
 The CI workflow in this repo runs the same checks on pushes and pull requests.
+
+---
+
+## Release automation
+
+This repository is set up for a `release-plz`-style release flow.
+
+The intended workflow is:
+
+1. merge normal work into `main`,
+2. GitHub Actions opens or updates a **release PR** on a `release-plz-*` branch,
+3. review that PR's version bump + changelog updates,
+4. merge the release PR,
+5. GitHub Actions automatically:
+   - tags the release,
+   - creates the GitHub release,
+   - publishes the crate to crates.io.
+
+### Required GitHub Actions secret
+
+To enable automated publishing, set:
+
+- `CARGO_REGISTRY_TOKEN`
+
+This should be a crates.io API token with publish scopes.
+
+### Important note for the very first release
+
+The first crates.io publish for a brand-new crate is often done manually first.
+After that, automated release workflows are much smoother.
 
 ---
 

@@ -4,6 +4,7 @@ Zero-configuration LAN service discovery for multi-agent systems in Rust using m
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](#installation)
+[![crates.io](https://img.shields.io/crates/v/zero-conf-mesh.svg)](https://crates.io/crates/zero-conf-mesh)
 [![CI](https://github.com/0xBoji/zero-conf-mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/0xBoji/zero-conf-mesh/actions/workflows/ci.yml)
 
 > Think of `zero-conf-mesh` as a small local-network presence layer for agents and tools:

@@ -85,9 +85,21 @@ impl ZeroConfMesh {
     /// Returns [`ZeroConfError`] when the runtime cannot be initialized.
     pub async fn from_config(config: ZeroConfConfig) -> Result<Self, ZeroConfError> {
         let registry = Registry::with_event_capacity(config.ttl(), config.event_capacity());
-        let local_announcement = config.local_announcement()?;
+        let mut local_announcement = config.local_announcement()?;
+        if let Some(auth) = config.shared_secret_auth() {
+            local_announcement.apply_shared_secret_auth(auth);
+        }
         let local_agent = std::sync::Arc::new(RwLock::new(local_announcement.clone()));
         let daemon = ServiceDaemon::new_with_port(config.mdns_port())?;
+
+        for interface in config.enabled_interfaces() {
+            daemon.enable_interface(interface.to_mdns_if_kind())?;
+        }
+
+        for interface in config.disabled_interfaces() {
+            daemon.disable_interface(interface.to_mdns_if_kind())?;
+        }
+
         let broadcaster =
             Broadcaster::new(daemon.clone(), config.service_type(), config.host_name());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -98,6 +110,7 @@ impl ZeroConfMesh {
             config.service_type(),
             config.agent_id(),
             config.instance_name(),
+            config.shared_secret_auth().cloned(),
         );
         let listener_task = announce_and_start_listener(
             &broadcaster,
@@ -213,6 +226,41 @@ impl ZeroConfMesh {
         self.registry.get_all_by_metadata(key, value).await
     }
 
+    /// Returns all known agents that contain a metadata key with the provided prefix.
+    pub async fn agents_with_metadata_key_prefix(&self, prefix: &str) -> Vec<AgentInfo> {
+        self.registry.get_all_with_metadata_key_prefix(prefix).await
+    }
+
+    /// Returns all known agents whose metadata value starts with the provided prefix.
+    pub async fn agents_with_metadata_prefix(&self, key: &str, prefix: &str) -> Vec<AgentInfo> {
+        self.registry.get_all_by_metadata_prefix(key, prefix).await
+    }
+
+    /// Returns all known agents whose metadata value matches the provided regex.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when the regex pattern is invalid.
+    pub async fn agents_with_metadata_regex(
+        &self,
+        key: &str,
+        pattern: &str,
+    ) -> Result<Vec<AgentInfo>, ZeroConfError> {
+        self.registry.get_all_by_metadata_regex(key, pattern).await
+    }
+
+    /// Returns all known agents that advertise the provided typed capability.
+    pub async fn agents_with_capability(&self, capability: &str) -> Vec<AgentInfo> {
+        self.registry.get_all_with_capability(capability).await
+    }
+
+    /// Returns all known agents matching a custom predicate.
+    pub async fn query_agents<F>(&self, predicate: F) -> Vec<AgentInfo>
+    where
+        F: Fn(&AgentInfo) -> bool,
+    {
+        self.registry.query(predicate).await
+    }
+
     /// Convenience alias for branch-focused queries.
     pub async fn who_is_on_branch(&self, branch: &str) -> Vec<AgentInfo> {
         self.agents_by_branch(branch).await
@@ -311,6 +359,40 @@ impl ZeroConfMesh {
             .await
     }
 
+    /// Replaces the local typed capability list and refreshes the announcement immediately.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when any capability is empty or contains a comma.
+    pub async fn update_capabilities<I, S>(&self, capabilities: I) -> Result<(), ZeroConfError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.mutate_local_agent(|local_agent| local_agent.set_capabilities(capabilities))
+            .await
+    }
+
+    /// Adds a typed capability to the local announcement and refreshes immediately.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when the capability is empty or contains a comma.
+    pub async fn add_capability(&self, capability: impl Into<String>) -> Result<(), ZeroConfError> {
+        self.mutate_local_agent(|local_agent| local_agent.add_capability(capability))
+            .await
+    }
+
+    /// Removes a typed capability from the local announcement and refreshes immediately.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when the capability is empty after trimming.
+    pub async fn remove_capability(
+        &self,
+        capability: impl Into<String>,
+    ) -> Result<(), ZeroConfError> {
+        self.mutate_local_agent(|local_agent| local_agent.remove_capability(capability))
+            .await
+    }
+
     /// Gracefully stops background tasks and removes the local agent from the registry.
     ///
     /// Calling this method multiple times is safe.
@@ -352,7 +434,13 @@ impl ZeroConfMesh {
     }
 
     async fn refresh_local_agent(&self) -> Result<(), ZeroConfError> {
-        let announcement = self.local_agent.read().await.clone();
+        let announcement = {
+            let mut local_agent = self.local_agent.write().await;
+            if let Some(auth) = self.config.shared_secret_auth() {
+                local_agent.apply_shared_secret_auth(auth);
+            }
+            local_agent.clone()
+        };
         self.broadcaster.announce(&announcement)?;
         self.registry.upsert_local(announcement).await;
         Ok(())
@@ -489,7 +577,7 @@ mod tests {
     use tokio::time;
 
     use super::*;
-    use crate::{DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_TTL, ZeroConfConfig};
+    use crate::{DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_TTL, NetworkInterface, ZeroConfConfig};
 
     #[tokio::test]
     async fn mesh_should_update_local_status() {
@@ -536,6 +624,7 @@ mod tests {
             DEFAULT_HEARTBEAT_INTERVAL,
             DEFAULT_TTL,
             crate::DEFAULT_EVENT_CAPACITY,
+            Vec::new(),
             crate::AgentMetadata::new(),
         )
         .expect("config should be valid");
@@ -552,6 +641,7 @@ mod tests {
             config.service_type(),
             config.agent_id(),
             config.instance_name(),
+            config.shared_secret_auth().cloned(),
         );
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -657,6 +747,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mesh_should_manage_typed_capabilities() {
+        let mesh = ZeroConfMesh::builder()
+            .agent_id("agent-1")
+            .role("coder")
+            .project("alpha")
+            .branch("main")
+            .port(8080)
+            .mdns_port(available_udp_port())
+            .capabilities(["review", "plan"])
+            .build()
+            .await
+            .expect("mesh should build");
+
+        mesh.add_capability("debug")
+            .await
+            .expect("capability should be added");
+        mesh.remove_capability("plan")
+            .await
+            .expect("capability should be removed");
+
+        let local = mesh.local_agent().await;
+        let reviewers = mesh.agents_with_capability("review").await;
+
+        assert_eq!(
+            local.capabilities(),
+            &["debug".to_owned(), "review".to_owned()]
+        );
+        assert_eq!(reviewers.len(), 1);
+        assert_eq!(
+            local.metadata().get(crate::AGENT_CAPABILITIES_METADATA_KEY),
+            Some(&"debug,review".to_owned())
+        );
+
+        mesh.shutdown().await.expect("shutdown should succeed");
+    }
+
+    #[tokio::test]
     async fn mesh_should_reject_reserved_metadata_updates() {
         let mesh = ZeroConfMesh::builder()
             .agent_id("agent-1")
@@ -691,6 +818,8 @@ mod tests {
             .branch("main")
             .port(8080)
             .mdns_port(available_udp_port())
+            .metadata("capability", "review")
+            .capabilities(["review", "plan"])
             .build()
             .await
             .expect("mesh should build");
@@ -702,6 +831,16 @@ mod tests {
         let alpha_main = mesh.agents_by_project_and_branch("alpha", "main").await;
         let idle = mesh.agents_by_status(AgentStatus::Idle).await;
         let coders = mesh.agents_by_role("coder").await;
+        let key_prefix = mesh.agents_with_metadata_key_prefix("cap").await;
+        let value_prefix = mesh.agents_with_metadata_prefix("capability", "rev").await;
+        let regex = mesh
+            .agents_with_metadata_regex("capability", "rev(iew)?")
+            .await
+            .expect("regex should compile");
+        let capability_agents = mesh.agents_with_capability("plan").await;
+        let custom = mesh
+            .query_agents(|agent| agent.project() == "alpha" && agent.has_capability("review"))
+            .await;
 
         assert_eq!(mesh.local_agent_id(), "agent-1");
         assert_eq!(local.agent_id(), "agent-1");
@@ -712,6 +851,38 @@ mod tests {
         assert_eq!(alpha_main.len(), 1);
         assert_eq!(idle.len(), 1);
         assert_eq!(coders.len(), 1);
+        assert_eq!(key_prefix.len(), 1);
+        assert_eq!(value_prefix.len(), 1);
+        assert_eq!(regex.len(), 1);
+        assert_eq!(capability_agents.len(), 1);
+        assert_eq!(custom.len(), 1);
+
+        mesh.shutdown().await.expect("shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn mesh_should_apply_interface_policy_from_builder() {
+        let mesh = ZeroConfMesh::builder()
+            .agent_id("agent-1")
+            .role("coder")
+            .project("alpha")
+            .branch("main")
+            .port(8080)
+            .mdns_port(available_udp_port())
+            .enable_interface(NetworkInterface::LoopbackV4)
+            .disable_interface(NetworkInterface::IPv6)
+            .build()
+            .await
+            .expect("mesh should build");
+
+        assert_eq!(
+            mesh.config().enabled_interfaces(),
+            &[NetworkInterface::LoopbackV4]
+        );
+        assert_eq!(
+            mesh.config().disabled_interfaces(),
+            &[NetworkInterface::IPv6]
+        );
 
         mesh.shutdown().await.expect("shutdown should succeed");
     }

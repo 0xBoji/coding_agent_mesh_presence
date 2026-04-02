@@ -7,6 +7,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- Advanced metadata queries for key-prefix, value-prefix, regex, and custom-predicate filtering.
+- Typed `capabilities` support in announcements, runtime updates, and peer queries.
+- Explicit interface include/exclude controls for the embedded `mdns-sd` daemon.
+- Optional shared-secret signing and peer verification modes for authenticated LAN discovery.
+
+### Changed
+- `capabilities` is now treated as a canonical first-class presence field instead of only ad-hoc metadata.
+
+### Tested
+- Advanced metadata query coverage in unit and runtime tests.
+- Typed capability propagation across multi-node discovery.
+- Builder/config handling for interface selection controls.
+- Shared-secret verified discovery and rejection of unsigned peers when verification is enabled.
+
 ## [0.1.2](https://github.com/0xBoji/zero-conf-mesh/compare/v0.1.1...v0.1.2) - 2026-04-02
 
 ### Other

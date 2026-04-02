@@ -8,7 +8,7 @@ use std::{
 
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use tokio::time;
-use zero_conf_mesh::{AgentStatus, DEFAULT_SERVICE_TYPE, ZeroConfMesh};
+use zero_conf_mesh::{AgentStatus, DEFAULT_SERVICE_TYPE, SharedSecretMode, ZeroConfMesh};
 
 #[tokio::test]
 async fn mesh_should_propagate_status_updates_to_remote_peers() -> Result<(), Box<dyn Error>> {
@@ -106,6 +106,156 @@ async fn mesh_should_propagate_metadata_removals_and_role_queries() -> Result<()
 
     mesh_a.shutdown().await?;
     mesh_b.shutdown().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mesh_should_propagate_capabilities_and_support_advanced_queries()
+-> Result<(), Box<dyn Error>> {
+    let mdns_port = available_udp_port();
+    let mesh_a = ZeroConfMesh::builder()
+        .agent_id("agent-a")
+        .role("planner")
+        .project("alpha")
+        .branch("main")
+        .port(8081)
+        .mdns_port(mdns_port)
+        .heartbeat_interval(Duration::from_millis(200))
+        .ttl(Duration::from_secs(2))
+        .metadata("capability", "planning")
+        .capabilities(["planning", "review"])
+        .enable_interface(zero_conf_mesh::NetworkInterface::LoopbackV4)
+        .build()
+        .await?;
+    let mesh_b = mesh("agent-b", "alpha", "main", 8082, mdns_port).await?;
+
+    let peer = wait_for_agent_matching(&mesh_b, "agent-a", |agent| {
+        agent.has_capability("planning") && agent.capabilities().len() == 2
+    })
+    .await?;
+
+    assert_eq!(
+        peer.capabilities(),
+        &["planning".to_owned(), "review".to_owned()]
+    );
+    assert_eq!(
+        ids(&mesh_b.agents_with_capability("review").await),
+        vec!["agent-a"]
+    );
+    assert_eq!(
+        ids(&mesh_b.agents_with_metadata_key_prefix("cap").await),
+        vec!["agent-a"]
+    );
+    assert_eq!(
+        ids(&mesh_b
+            .agents_with_metadata_prefix("capability", "plan")
+            .await),
+        vec!["agent-a"]
+    );
+    assert_eq!(
+        ids(&mesh_b
+            .agents_with_metadata_regex("capability", "plann(ing)?")
+            .await?),
+        vec!["agent-a"]
+    );
+    assert_eq!(
+        ids(&mesh_b
+            .query_agents(|agent| agent.role() == "planner" && agent.has_capability("planning"))
+            .await),
+        vec!["agent-a"]
+    );
+
+    mesh_a.shutdown().await?;
+    mesh_b.shutdown().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mesh_should_discover_signed_peers_with_shared_secret_verification()
+-> Result<(), Box<dyn Error>> {
+    let mdns_port = available_udp_port();
+    let mesh_a = ZeroConfMesh::builder()
+        .agent_id("agent-a")
+        .role("planner")
+        .project("alpha")
+        .branch("main")
+        .port(8081)
+        .mdns_port(mdns_port)
+        .heartbeat_interval(Duration::from_millis(200))
+        .ttl(Duration::from_secs(2))
+        .shared_secret("mesh-secret")
+        .capabilities(["planning"])
+        .build()
+        .await?;
+    let mesh_b = ZeroConfMesh::builder()
+        .agent_id("agent-b")
+        .role("worker")
+        .project("alpha")
+        .branch("main")
+        .port(8082)
+        .mdns_port(mdns_port)
+        .heartbeat_interval(Duration::from_millis(200))
+        .ttl(Duration::from_secs(2))
+        .shared_secret_with_mode("mesh-secret", SharedSecretMode::SignAndVerify)
+        .build()
+        .await?;
+
+    let peer =
+        wait_for_agent_matching(&mesh_b, "agent-a", |agent| agent.has_capability("planning"))
+            .await?;
+
+    assert!(peer.metadata().contains_key("zcm_sig"));
+
+    mesh_a.shutdown().await?;
+    mesh_b.shutdown().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mesh_should_ignore_unsigned_peers_when_shared_secret_verification_is_enabled()
+-> Result<(), Box<dyn Error>> {
+    let mdns_port = available_udp_port();
+    let verifier_mesh = ZeroConfMesh::builder()
+        .agent_id("agent-verifier")
+        .role("worker")
+        .project("alpha")
+        .branch("main")
+        .port(8081)
+        .mdns_port(mdns_port)
+        .heartbeat_interval(Duration::from_millis(200))
+        .ttl(Duration::from_secs(2))
+        .shared_secret("mesh-secret")
+        .build()
+        .await?;
+
+    let invalid_daemon = ServiceDaemon::new_with_port(mdns_port)?;
+    let invalid_service = ServiceInfo::new(
+        DEFAULT_SERVICE_TYPE,
+        "agent-unsigned",
+        "agent-unsigned.local.",
+        "",
+        8083,
+        &[
+            ("agent_id", "agent-unsigned"),
+            ("role", "worker"),
+            ("current_project", "alpha"),
+            ("current_branch", "main"),
+            ("status", "idle"),
+        ][..],
+    )?
+    .enable_addr_auto();
+    let invalid_fullname = invalid_service.get_fullname().to_string();
+    invalid_daemon.register(invalid_service)?;
+
+    wait_for_agent_to_remain_absent(&verifier_mesh, "agent-unsigned", Duration::from_secs(2))
+        .await?;
+
+    unregister_service(&invalid_daemon, &invalid_fullname).await;
+    let _ = invalid_daemon.shutdown();
+    verifier_mesh.shutdown().await?;
 
     Ok(())
 }

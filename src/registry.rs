@@ -1,15 +1,21 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
+use regex::Regex;
 use tokio::sync::{RwLock, broadcast};
 
 use crate::{
     config::DEFAULT_EVENT_CAPACITY,
+    error::ZeroConfError,
     events::{AgentEvent, DepartureReason, EventOrigin},
     types::{AgentAnnouncement, AgentInfo},
 };
 
 /// Result of an upsert operation against the registry.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "upsert results intentionally return full snapshots for observability and testing"
+)]
 pub enum RegistryUpsert {
     /// A new agent was inserted.
     Inserted(AgentInfo),
@@ -196,34 +202,17 @@ impl Registry {
 
     /// Returns all known agents.
     pub async fn list(&self) -> Vec<AgentInfo> {
-        let registry = self.inner.read().await;
-        let mut agents = registry.values().cloned().collect::<Vec<_>>();
-        agents.sort_by(|left, right| left.id().cmp(right.id()));
-        agents
+        self.query(|_| true).await
     }
 
     /// Returns all known agents within a project namespace.
     pub async fn get_all_by_project(&self, project: &str) -> Vec<AgentInfo> {
-        let registry = self.inner.read().await;
-        let mut agents = registry
-            .values()
-            .filter(|agent| agent.project() == project)
-            .cloned()
-            .collect::<Vec<_>>();
-        agents.sort_by(|left, right| left.id().cmp(right.id()));
-        agents
+        self.query(|agent| agent.project() == project).await
     }
 
     /// Returns all known agents currently attached to a branch or workstream.
     pub async fn get_all_by_branch(&self, branch: &str) -> Vec<AgentInfo> {
-        let registry = self.inner.read().await;
-        let mut agents = registry
-            .values()
-            .filter(|agent| agent.branch() == branch)
-            .cloned()
-            .collect::<Vec<_>>();
-        agents.sort_by(|left, right| left.id().cmp(right.id()));
-        agents
+        self.query(|agent| agent.branch() == branch).await
     }
 
     /// Returns all known agents matching both project and branch.
@@ -232,63 +221,90 @@ impl Registry {
         project: &str,
         branch: &str,
     ) -> Vec<AgentInfo> {
-        let registry = self.inner.read().await;
-        let mut agents = registry
-            .values()
-            .filter(|agent| agent.project() == project && agent.branch() == branch)
-            .cloned()
-            .collect::<Vec<_>>();
-        agents.sort_by(|left, right| left.id().cmp(right.id()));
-        agents
+        self.query(|agent| agent.project() == project && agent.branch() == branch)
+            .await
     }
 
     /// Returns all known agents matching a specific status.
     pub async fn get_all_by_status(&self, status: crate::types::AgentStatus) -> Vec<AgentInfo> {
-        let registry = self.inner.read().await;
-        let mut agents = registry
-            .values()
-            .filter(|agent| agent.status() == status)
-            .cloned()
-            .collect::<Vec<_>>();
-        agents.sort_by(|left, right| left.id().cmp(right.id()));
-        agents
+        self.query(|agent| agent.status() == status).await
     }
 
     /// Returns all known agents matching a specific role.
     pub async fn get_all_by_role(&self, role: &str) -> Vec<AgentInfo> {
-        let registry = self.inner.read().await;
-        let mut agents = registry
-            .values()
-            .filter(|agent| agent.role() == role)
-            .cloned()
-            .collect::<Vec<_>>();
-        agents.sort_by(|left, right| left.id().cmp(right.id()));
-        agents
+        self.query(|agent| agent.role() == role).await
     }
 
     /// Returns all known agents that contain the provided metadata key.
     pub async fn get_all_with_metadata_key(&self, key: &str) -> Vec<AgentInfo> {
-        let registry = self.inner.read().await;
-        let mut agents = registry
-            .values()
-            .filter(|agent| agent.metadata().contains_key(key))
-            .cloned()
-            .collect::<Vec<_>>();
-        agents.sort_by(|left, right| left.id().cmp(right.id()));
-        agents
+        self.query(|agent| agent.metadata().contains_key(key)).await
     }
 
     /// Returns all known agents whose metadata contains the provided key/value pair.
     pub async fn get_all_by_metadata(&self, key: &str, value: &str) -> Vec<AgentInfo> {
-        let registry = self.inner.read().await;
-        let mut agents = registry
-            .values()
-            .filter(|agent| {
+        self.query(|agent| {
+            agent
+                .metadata()
+                .get(key)
+                .is_some_and(|stored| stored == value)
+        })
+        .await
+    }
+
+    /// Returns all known agents that contain a metadata key with the provided prefix.
+    pub async fn get_all_with_metadata_key_prefix(&self, prefix: &str) -> Vec<AgentInfo> {
+        self.query(|agent| agent.metadata().keys().any(|key| key.starts_with(prefix)))
+            .await
+    }
+
+    /// Returns all known agents whose metadata value starts with the provided prefix.
+    pub async fn get_all_by_metadata_prefix(&self, key: &str, prefix: &str) -> Vec<AgentInfo> {
+        self.query(|agent| {
+            agent
+                .metadata()
+                .get(key)
+                .is_some_and(|stored| stored.starts_with(prefix))
+        })
+        .await
+    }
+
+    /// Returns all known agents whose metadata value matches the provided regex.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when the regex pattern is invalid.
+    pub async fn get_all_by_metadata_regex(
+        &self,
+        key: &str,
+        pattern: &str,
+    ) -> Result<Vec<AgentInfo>, ZeroConfError> {
+        let regex = Regex::new(pattern).map_err(|source| ZeroConfError::InvalidMetadataRegex {
+            pattern: pattern.to_owned(),
+            source,
+        })?;
+        Ok(self
+            .query(|agent| {
                 agent
                     .metadata()
                     .get(key)
-                    .is_some_and(|stored| stored == value)
+                    .is_some_and(|stored| regex.is_match(stored))
             })
+            .await)
+    }
+
+    /// Returns all known agents that advertise the provided typed capability.
+    pub async fn get_all_with_capability(&self, capability: &str) -> Vec<AgentInfo> {
+        self.query(|agent| agent.has_capability(capability)).await
+    }
+
+    /// Returns all known agents matching a custom predicate.
+    pub async fn query<F>(&self, predicate: F) -> Vec<AgentInfo>
+    where
+        F: Fn(&AgentInfo) -> bool,
+    {
+        let registry = self.inner.read().await;
+        let mut agents = registry
+            .values()
+            .filter(|agent| predicate(agent))
             .cloned()
             .collect::<Vec<_>>();
         agents.sort_by(|left, right| left.id().cmp(right.id()));
@@ -404,11 +420,17 @@ mod tests {
         reviewer
             .set_metadata("capability", "review")
             .expect("metadata should update");
+        reviewer
+            .set_capabilities(["review", "plan"])
+            .expect("typed capabilities should update");
 
         let mut worker = announcement("agent-b", "beta", AgentStatus::Busy);
         worker
             .set_metadata("capability", "planning")
             .expect("metadata should update");
+        worker
+            .set_capabilities(["execute"])
+            .expect("typed capabilities should update");
 
         registry.upsert(reviewer).await;
         registry.upsert(worker).await;
@@ -416,11 +438,42 @@ mod tests {
         let coders = registry.get_all_by_role("coder").await;
         let planning = registry.get_all_by_metadata("capability", "planning").await;
         let capability_key = registry.get_all_with_metadata_key("capability").await;
+        let key_prefix = registry.get_all_with_metadata_key_prefix("cap").await;
+        let value_prefix = registry
+            .get_all_by_metadata_prefix("capability", "plan")
+            .await;
+        let regex = registry
+            .get_all_by_metadata_regex("capability", "plann(ing)?")
+            .await
+            .expect("regex should compile");
+        let planners = registry.get_all_with_capability("plan").await;
+        let custom = registry
+            .query(|agent| agent.project() == "alpha" && agent.has_capability("review"))
+            .await;
 
         assert_eq!(coders.len(), 2);
         assert_eq!(planning.len(), 1);
         assert_eq!(planning[0].id(), "agent-b");
         assert_eq!(capability_key.len(), 2);
+        assert_eq!(key_prefix.len(), 2);
+        assert_eq!(value_prefix.len(), 1);
+        assert_eq!(regex.len(), 1);
+        assert_eq!(planners.len(), 1);
+        assert_eq!(planners[0].id(), "agent-a");
+        assert_eq!(custom.len(), 1);
+        assert_eq!(custom[0].id(), "agent-a");
+    }
+
+    #[tokio::test]
+    async fn registry_should_reject_invalid_metadata_regex() {
+        let registry = Registry::new(Duration::from_secs(120));
+
+        let err = registry
+            .get_all_by_metadata_regex("capability", "(")
+            .await
+            .expect_err("invalid regex should fail");
+
+        assert!(matches!(err, ZeroConfError::InvalidMetadataRegex { .. }));
     }
 
     #[tokio::test]

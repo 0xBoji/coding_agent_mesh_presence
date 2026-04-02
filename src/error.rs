@@ -45,6 +45,18 @@ pub enum ZeroConfError {
         /// The reserved metadata key.
         key: String,
     },
+    /// Capability names must not be empty after trimming.
+    #[error("capability names must not be empty")]
+    EmptyCapability,
+    /// Shared secrets must not be empty after trimming.
+    #[error("shared secret must not be empty")]
+    EmptySharedSecret,
+    /// Capability names must not contain commas because the wire format uses comma separation.
+    #[error("invalid capability `{value}`; capability names must not contain commas")]
+    InvalidCapability {
+        /// The invalid capability value.
+        value: String,
+    },
     /// A required TXT property was missing from a discovered service.
     #[error("missing required TXT property `{key}`")]
     MissingTxtProperty {
@@ -62,6 +74,27 @@ pub enum ZeroConfError {
     InvalidStatus {
         /// The invalid status string.
         value: String,
+    },
+    /// A metadata regex query could not be compiled.
+    #[error("invalid metadata regex `{pattern}`: {source}")]
+    InvalidMetadataRegex {
+        /// The invalid regex pattern.
+        pattern: String,
+        /// The underlying regex compilation error.
+        #[source]
+        source: regex::Error,
+    },
+    /// Required authentication metadata was not present.
+    #[error("missing authentication metadata `{key}`")]
+    MissingAuthMetadata {
+        /// The missing authentication key.
+        key: &'static str,
+    },
+    /// Shared-secret verification failed for a discovered announcement.
+    #[error("shared-secret verification failed for agent `{agent_id}`")]
+    InvalidSharedSecretSignature {
+        /// The agent identifier associated with the invalid signature.
+        agent_id: String,
     },
     /// mDNS/DNS-SD service construction failed.
     #[error("mdns error: {0}")]

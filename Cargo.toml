@@ -22,8 +22,12 @@ include = [
 ]
 
 [dependencies]
+base64 = "0.22.1"
+hmac = "0.12.1"
 mdns-sd = "0.18.2"
+regex = "1.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
+sha2 = "0.10.9"
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"

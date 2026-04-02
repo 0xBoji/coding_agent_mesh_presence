@@ -442,7 +442,8 @@ This is useful when:
 
 - an agent moves to a different workstream,
 - status changes over time,
-- you want to attach extra capabilities or labels at runtime.
+- you want to attach extra labels at runtime,
+- you want to promote typed capabilities like `planning`, `review`, or `debug`.
 
 ---
 
@@ -487,6 +488,11 @@ Common runtime methods:
 - `agents_by_role(...).await`
 - `agents_with_metadata_key(...).await`
 - `agents_with_metadata(...).await`
+- `agents_with_metadata_key_prefix(...).await`
+- `agents_with_metadata_prefix(...).await`
+- `agents_with_metadata_regex(...).await`
+- `agents_with_capability(...).await`
+- `query_agents(...).await`
 - `who_is_on_branch(...).await`
 - `subscribe()`
 - `update_status(...).await`
@@ -494,6 +500,9 @@ Common runtime methods:
 - `update_branch(...).await`
 - `update_metadata(...).await`
 - `remove_metadata(...).await`
+- `update_capabilities(...).await`
+- `add_capability(...).await`
+- `remove_capability(...).await`
 - `shutdown().await`
 
 In most applications, you can ignore the lower-level internals and just work through `ZeroConfMesh`.
@@ -515,6 +524,12 @@ Available builder setters:
 - `heartbeat_interval(...)`
 - `ttl(...)`
 - `event_capacity(...)`
+- `capability(...)`
+- `capabilities(...)`
+- `enable_interface(...)`
+- `disable_interface(...)`
+- `shared_secret(...)`
+- `shared_secret_with_mode(...)`
 - `metadata(key, value)`
 - `metadata_map(...)`
 
@@ -552,6 +567,9 @@ After startup, the local node can refresh selected advertised fields without reb
 - `update_branch(...)`
 - `update_metadata(...)`
 - `remove_metadata(...)`
+- `update_capabilities(...)`
+- `add_capability(...)`
+- `remove_capability(...)`
 
 `update_metadata(...)` is for **non-canonical extension keys** such as:
 
@@ -566,6 +584,9 @@ Canonical fields like:
 - `current_project`
 - `current_branch`
 - `status`
+- `capabilities`
+- `zcm_auth`
+- `zcm_sig`
 
 are intentionally managed through dedicated fields and updater methods so callers do not accidentally create divergent runtime state.
 
@@ -574,6 +595,113 @@ Query helpers also include:
 - `agents_by_role(...)`
 - `agents_with_metadata_key(...)`
 - `agents_with_metadata(...)`
+- `agents_with_metadata_key_prefix(...)`
+- `agents_with_metadata_prefix(...)`
+- `agents_with_metadata_regex(...)`
+- `agents_with_capability(...)`
+- `query_agents(...)`
+
+### Typed capabilities
+
+For richer presence data, the crate now treats `capabilities` as a first-class typed field instead of only expecting callers to stuff everything into the free-form metadata map.
+
+That means you can write things like:
+
+```rust,no_run
+# use zero_conf_mesh::ZeroConfMesh;
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mesh = ZeroConfMesh::builder()
+    .agent_id("agent-01")
+    .role("planner")
+    .project("alpha")
+    .branch("main")
+    .port(8080)
+    .capabilities(["planning", "review"])
+    .build()
+    .await?;
+
+mesh.add_capability("debug").await?;
+
+let planners = mesh.agents_with_capability("planning").await;
+assert!(!planners.is_empty());
+
+mesh.shutdown().await?;
+# Ok(())
+# }
+```
+
+On the wire, these are still represented compactly in TXT metadata, but the runtime API exposes them as a typed list.
+
+### Optional shared-secret verification
+
+The crate now supports an opt-in LAN security layer based on shared-secret HMAC signing.
+
+You can enable it in two modes:
+
+- `SharedSecretMode::SignOnly`
+  - sign local announcements,
+  - do not reject unsigned remote peers.
+- `SharedSecretMode::SignAndVerify`
+  - sign local announcements,
+  - reject remote peers whose signatures are missing or invalid.
+
+Example:
+
+```rust,no_run
+# use zero_conf_mesh::{SharedSecretMode, ZeroConfMesh};
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mesh = ZeroConfMesh::builder()
+    .agent_id("agent-01")
+    .role("worker")
+    .project("alpha")
+    .branch("main")
+    .port(8080)
+    .shared_secret_with_mode("mesh-secret", SharedSecretMode::SignAndVerify)
+    .build()
+    .await?;
+
+mesh.shutdown().await?;
+# Ok(())
+# }
+```
+
+This is intentionally lightweight:
+
+- it helps prevent accidental or unauthorized peer acceptance on a shared LAN,
+- it does **not** encrypt traffic,
+- it does **not** try to provide full mutual-auth PKI semantics.
+
+### Interface / network controls
+
+If you need tighter NIC selection, the builder can now apply include/exclude rules to the embedded `mdns-sd` daemon:
+
+```rust,no_run
+# use zero_conf_mesh::{NetworkInterface, ZeroConfMesh};
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mesh = ZeroConfMesh::builder()
+    .agent_id("agent-01")
+    .role("worker")
+    .project("alpha")
+    .branch("main")
+    .port(8080)
+    .enable_interface(NetworkInterface::LoopbackV4)
+    .disable_interface(NetworkInterface::IPv6)
+    .build()
+    .await?;
+
+mesh.shutdown().await?;
+# Ok(())
+# }
+```
+
+This is useful when:
+
+- you want deterministic local test behavior,
+- you want to exclude IPv6 for a specific deployment,
+- you want to constrain discovery to a named NIC or address family.
 
 ---
 
@@ -623,6 +751,12 @@ The canonical TXT keys are:
 - `current_project`
 - `current_branch`
 - `status`
+- `capabilities`
+
+When shared-secret auth is enabled, the crate also emits reserved auth keys:
+
+- `zcm_auth`
+- `zcm_sig`
 
 The MVP requires the first-class discovery identity to include:
 
@@ -696,10 +830,10 @@ This crate is intentionally **not** trying to be:
 Current limitations:
 
 - LAN only; no cross-subnet guarantees
-- no authentication or encryption of advertisements
+- no encrypted advertisements
 - no reliable delivery semantics
 - no leader election or consensus
-- no explicit network interface control beyond what `mdns-sd` provides
+- no asymmetric signature / key-rotation story yet
 
 ---
 
@@ -717,6 +851,9 @@ Current automated coverage includes:
 - remote status propagation after local updates,
 - remote project/branch/metadata propagation after local updates,
 - remote metadata removal propagation after local updates,
+- remote typed capability propagation plus advanced query coverage,
+- shared-secret verified peer discovery,
+- unsigned peers being ignored when verification is enabled,
 - multi-peer discovery on one custom mDNS port,
 - project isolation across shared-LAN discovery,
 - malformed remote TXT payloads being ignored,
@@ -802,11 +939,11 @@ Before publishing to crates.io, you would still typically want to:
 
 Things that would be natural to add next, depending on real-world usage:
 
-- configurable event channel capacity in the public runtime builder,
 - richer status vocabularies or user-defined states,
-- additional query helpers for roles/capabilities,
-- explicit metadata removal / replacement helpers,
-- more explicit interface-selection controls if deployments require them.
+- stronger authentication options beyond shared secrets,
+- key rotation / trust-policy helpers for authenticated deployments,
+- capability grouping or namespacing conventions,
+- richer interface policy presets if deployments need them.
 
 Importantly, those are **potential improvements**, not prerequisites for the current MVP.
 

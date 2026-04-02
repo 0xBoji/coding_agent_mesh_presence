@@ -5,11 +5,12 @@ use uuid::Uuid;
 use crate::{
     config::{
         DEFAULT_EVENT_CAPACITY, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_MDNS_PORT,
-        DEFAULT_SERVICE_TYPE, DEFAULT_TTL, ZeroConfConfig,
+        DEFAULT_SERVICE_TYPE, DEFAULT_TTL, NetworkInterface, SharedSecretAuth, SharedSecretMode,
+        ZeroConfConfig,
     },
     error::ZeroConfError,
     mesh::ZeroConfMesh,
-    types::{AgentMetadata, AgentStatus},
+    types::{AgentMetadata, AgentStatus, canonicalize_capabilities},
 };
 
 /// Builder for constructing a [`ZeroConfMesh`] instance.
@@ -47,6 +48,10 @@ pub struct ZeroConfMeshBuilder {
     ttl: Duration,
     event_capacity: usize,
     metadata: AgentMetadata,
+    capabilities: Vec<String>,
+    enabled_interfaces: Vec<NetworkInterface>,
+    disabled_interfaces: Vec<NetworkInterface>,
+    shared_secret_auth: Option<(String, SharedSecretMode)>,
 }
 
 impl Default for ZeroConfMeshBuilder {
@@ -64,6 +69,10 @@ impl Default for ZeroConfMeshBuilder {
             ttl: DEFAULT_TTL,
             event_capacity: DEFAULT_EVENT_CAPACITY,
             metadata: AgentMetadata::new(),
+            capabilities: Vec::new(),
+            enabled_interfaces: Vec::new(),
+            disabled_interfaces: Vec::new(),
+            shared_secret_auth: None,
         }
     }
 }
@@ -160,6 +169,58 @@ impl ZeroConfMeshBuilder {
         self
     }
 
+    /// Adds a typed capability to the local announcement.
+    #[must_use]
+    pub fn capability(mut self, capability: impl Into<String>) -> Self {
+        self.capabilities.push(capability.into());
+        self
+    }
+
+    /// Replaces the full typed capability list for the local announcement.
+    #[must_use]
+    pub fn capabilities<I, S>(mut self, capabilities: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.capabilities = capabilities.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Restricts the embedded mDNS daemon to a specific interface selector.
+    #[must_use]
+    pub fn enable_interface(mut self, interface: impl Into<NetworkInterface>) -> Self {
+        self.enabled_interfaces.push(interface.into());
+        self
+    }
+
+    /// Excludes a specific interface selector from the embedded mDNS daemon.
+    #[must_use]
+    pub fn disable_interface(mut self, interface: impl Into<NetworkInterface>) -> Self {
+        self.disabled_interfaces.push(interface.into());
+        self
+    }
+
+    /// Enables shared-secret signing and verification for mesh announcements.
+    #[must_use]
+    pub fn shared_secret(mut self, secret: impl Into<String>) -> Self {
+        self.shared_secret_auth = Some((secret.into(), SharedSecretMode::SignAndVerify));
+        self
+    }
+
+    /// Enables shared-secret authentication with an explicit mode.
+    ///
+    /// Invalid secrets are reported when [`Self::build`] is called.
+    #[must_use]
+    pub fn shared_secret_with_mode(
+        mut self,
+        secret: impl Into<String>,
+        mode: SharedSecretMode,
+    ) -> Self {
+        self.shared_secret_auth = Some((secret.into(), mode));
+        self
+    }
+
     /// Builds and starts a mesh runtime skeleton.
     ///
     /// # Errors
@@ -172,8 +233,10 @@ impl ZeroConfMeshBuilder {
     fn build_config(self) -> Result<ZeroConfConfig, ZeroConfError> {
         let agent_id = self.agent_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let port = self.port.ok_or(ZeroConfError::InvalidPort)?;
+        let capabilities = canonicalize_capabilities(self.capabilities)?;
+        let metadata = self.metadata;
 
-        ZeroConfConfig::new(
+        let config = ZeroConfConfig::new(
             agent_id,
             self.role,
             self.project,
@@ -185,8 +248,19 @@ impl ZeroConfMeshBuilder {
             self.heartbeat_interval,
             self.ttl,
             self.event_capacity,
-            self.metadata,
-        )
+            capabilities,
+            metadata,
+        )?;
+
+        let config = config
+            .with_enabled_interfaces(self.enabled_interfaces)
+            .with_disabled_interfaces(self.disabled_interfaces);
+
+        if let Some((secret, mode)) = self.shared_secret_auth {
+            Ok(config.with_shared_secret_auth(SharedSecretAuth::new(secret, mode)?))
+        } else {
+            Ok(config)
+        }
     }
 }
 
@@ -236,5 +310,91 @@ mod tests {
             .expect_err("zero event capacity should be rejected");
 
         assert_eq!(err.to_string(), "event capacity must be greater than zero");
+    }
+
+    #[test]
+    fn builder_should_embed_typed_capabilities_and_interface_policies_in_config() {
+        let config = ZeroConfMesh::builder()
+            .agent_id("agent-1")
+            .role("reviewer")
+            .project("alpha")
+            .branch("main")
+            .port(8080)
+            .capability("review")
+            .capability("plan")
+            .enable_interface(NetworkInterface::LoopbackV4)
+            .disable_interface(NetworkInterface::IPv6)
+            .build_config()
+            .expect("config should build");
+
+        assert_eq!(
+            config.capabilities(),
+            &["plan".to_owned(), "review".to_owned()]
+        );
+        assert_eq!(config.enabled_interfaces(), &[NetworkInterface::LoopbackV4]);
+        assert_eq!(config.disabled_interfaces(), &[NetworkInterface::IPv6]);
+    }
+
+    #[test]
+    fn builder_should_reject_invalid_capabilities() {
+        let err = ZeroConfMesh::builder()
+            .agent_id("agent-1")
+            .role("reviewer")
+            .project("alpha")
+            .branch("main")
+            .port(8080)
+            .capability("review,plan")
+            .build_config()
+            .expect_err("comma separated capability should be rejected");
+
+        assert!(matches!(err, ZeroConfError::InvalidCapability { .. }));
+    }
+
+    #[test]
+    fn builder_should_embed_shared_secret_auth_in_config() {
+        let config = ZeroConfMesh::builder()
+            .agent_id("agent-1")
+            .role("reviewer")
+            .project("alpha")
+            .branch("main")
+            .port(8080)
+            .shared_secret("top-secret")
+            .build_config()
+            .expect("config should build");
+
+        let auth = config
+            .shared_secret_auth()
+            .expect("shared secret auth should be present");
+        assert_eq!(auth.mode(), SharedSecretMode::SignAndVerify);
+    }
+
+    #[test]
+    fn builder_should_reject_empty_shared_secret() {
+        let err = ZeroConfMesh::builder()
+            .agent_id("agent-1")
+            .role("reviewer")
+            .project("alpha")
+            .branch("main")
+            .port(8080)
+            .shared_secret("   ")
+            .build_config()
+            .expect_err("empty shared secret should be rejected");
+
+        assert!(matches!(err, ZeroConfError::EmptySharedSecret));
+    }
+
+    #[test]
+    fn builder_should_reject_reserved_metadata_keys() {
+        let err = ZeroConfMesh::builder()
+            .agent_id("agent-1")
+            .role("reviewer")
+            .project("alpha")
+            .branch("main")
+            .port(8080)
+            .metadata(crate::AGENT_SIGNATURE_METADATA_KEY, "forged")
+            .build_config()
+            .expect_err("reserved metadata should be rejected");
+
+        assert!(matches!(err, ZeroConfError::ReservedMetadataKey { key } if key == "zcm_sig"));
     }
 }

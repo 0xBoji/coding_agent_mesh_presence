@@ -21,6 +21,10 @@ pub enum DepartureReason {
 /// Registry event emitted when an agent enters, changes, or leaves the mesh.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "events intentionally carry full snapshots so consumers can diff without extra registry lookups"
+)]
 pub enum AgentEvent {
     /// A new agent was added to the registry.
     Joined {

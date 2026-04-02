@@ -76,7 +76,7 @@ The crate uses `tokio` for orchestration and `mdns-sd` for network I/O.
 3. Construct local announcement and register it.
 4. Insert the local node into the registry as a local-origin entry.
 5. Start listener, heartbeat, and sweeper tasks.
-6. Remote `ServiceResolved` events are parsed into `AgentAnnouncement` values and upserted into the registry.
+6. Remote `ServiceResolved` events are parsed into `AgentAnnouncement` values, optionally verified against a shared secret, and then upserted into the registry.
 7. Remote `ServiceRemoved` events remove matching peers by instance name.
 8. On shutdown, the local service is unregistered, local registry state is removed, tasks stop, and the daemon is shut down.
 
@@ -94,6 +94,11 @@ The canonical TXT keys are:
 - `current_project`
 - `current_branch`
 - `status`
+- `capabilities`
+
+When shared-secret auth is enabled, the crate also emits reserved auth metadata:
+- `zcm_auth`
+- `zcm_sig`
 
 The Vietnamese MVP spec requires `agent_id`, `current_project`, and `current_branch` as first-class discovery fields. The current implementation also keeps `role` and `status` so the mesh can answer “who is doing what?” rather than only “who exists?”.
 
@@ -133,6 +138,7 @@ Important fields:
 - `project: String`
 - `branch: String`
 - `status: AgentStatus`
+- `capabilities: Vec<String>`
 - `port: u16`
 - `addresses: Vec<IpAddr>`
 - `metadata: AgentMetadata`
@@ -148,6 +154,7 @@ pub struct AgentInfo {
     project: String,
     branch: String,
     status: AgentStatus,
+    capabilities: Vec<String>,
     port: u16,
     addresses: Vec<IpAddr>,
     metadata: AgentMetadata,
@@ -200,6 +207,12 @@ Current builder setters:
 - `heartbeat_interval(...)`
 - `ttl(...)`
 - `event_capacity(...)`
+- `capability(...)`
+- `capabilities(...)`
+- `enable_interface(...)`
+- `disable_interface(...)`
+- `shared_secret(...)`
+- `shared_secret_with_mode(...)`
 - `metadata(key, value)`
 - `metadata_map(...)`
 - `build().await`
@@ -233,6 +246,11 @@ Defaults:
 - `agents_by_role(...).await`
 - `agents_with_metadata_key(...).await`
 - `agents_with_metadata(...).await`
+- `agents_with_metadata_key_prefix(...).await`
+- `agents_with_metadata_prefix(...).await`
+- `agents_with_metadata_regex(...).await`
+- `agents_with_capability(...).await`
+- `query_agents(...).await`
 - `who_is_on_branch(...).await`
 - `subscribe()`
 - `update_status(...).await`
@@ -240,11 +258,14 @@ Defaults:
 - `update_branch(...).await`
 - `update_metadata(...).await`
 - `remove_metadata(...).await`
+- `update_capabilities(...).await`
+- `add_capability(...).await`
+- `remove_capability(...).await`
 - `shutdown().await`
 
 `registry()` is still available for advanced read access, but typical consumers should prefer the high-level query methods on `ZeroConfMesh`.
 
-`update_metadata(...)` is intended for non-canonical extension keys only. Canonical keys such as `agent_id`, `current_project`, `current_branch`, `role`, and `status` remain managed by the crate so callers do not accidentally create divergent runtime state.
+`update_metadata(...)` is intended for non-canonical extension keys only. Canonical keys such as `agent_id`, `current_project`, `current_branch`, `role`, `status`, `capabilities`, `zcm_auth`, and `zcm_sig` remain managed by the crate so callers do not accidentally create divergent runtime state.
 
 ### 5.4 Lifecycle Events
 ```rust
@@ -280,10 +301,15 @@ Semantics:
 - invalid event channel capacity,
 - invalid heartbeat/TTL relationship,
 - empty metadata keys,
+- empty shared secrets,
+- invalid capability names,
+- invalid metadata regex patterns,
 - reserved canonical metadata keys used with generic metadata updaters,
 - missing required TXT properties,
+- missing authentication metadata for verified peers,
 - invalid TXT property encoding,
 - invalid status strings,
+- invalid shared-secret signatures,
 - wrapped `mdns_sd::Error`,
 - background task join errors.
 
@@ -322,8 +348,9 @@ This ratio provides:
 
 ## 7. Constraints and Edge Cases
 - **Local-network only**: mDNS does not cross routers/subnets by default.
-- **Multiple interfaces**: interface selection is delegated to `mdns-sd`; the current implementation also supports a custom mDNS UDP port for test isolation.
+- **Multiple interfaces**: interface selection is delegated to `mdns-sd`, but the current implementation exposes explicit include/exclude interface selectors through the builder/config in addition to custom mDNS UDP port support for test isolation.
 - **Local address population**: local `ServiceInfo` enables `addr_auto` so the daemon can fill host addresses automatically.
+- **Shared-secret verification**: when enabled in `SignAndVerify` mode, unsigned or invalidly signed peers are ignored by the listener.
 - **TXT parsing**: remote peers missing required fields are ignored rather than partially inserted.
 - **Dropped event subscribers**: registry event delivery is best-effort through a broadcast channel.
 - **Duplicate announcements**: repeated identical payloads only refresh `last_seen`; they do not emit update events.
@@ -359,10 +386,14 @@ Scenarios:
 - local status update propagation,
 - local project/branch/metadata update propagation,
 - local metadata removal propagation,
+- local typed capability update propagation,
+- shared-secret verified discovery between signed peers,
+- unsigned peers being ignored when verification is enabled,
 - discovery between two mesh nodes on the same custom mDNS port,
 - remote peer status update propagation after a local status change,
 - remote peer project/branch/metadata update propagation after a local runtime change,
 - remote peer metadata removal propagation after a local runtime change,
+- remote peer capability propagation plus advanced metadata query coverage,
 - multi-peer discovery on the same custom mDNS port,
 - project isolation via query helpers on a shared LAN,
 - malformed remote TXT payloads being ignored by the listener.
@@ -397,7 +428,7 @@ To keep the suite reliable:
 
 ## 10. Future Work
 - richer status vocabularies or user-defined states,
-- richer metadata query expressions (prefix/regex/custom predicates),
-- encrypted or signed metadata payloads,
+- stronger authentication options such as asymmetric signatures or key rotation,
+- encrypted metadata payloads,
 - leader election or higher-level coordination protocols,
-- more explicit network-interface controls if required by real deployments.
+- richer authorization policies on top of shared-secret verification.

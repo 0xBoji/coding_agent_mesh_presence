@@ -1,11 +1,11 @@
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
 use crate::{
     error::ZeroConfError,
     types::{
         AGENT_BRANCH_METADATA_KEY, AGENT_ID_METADATA_KEY, AGENT_PROJECT_METADATA_KEY,
         AGENT_ROLE_METADATA_KEY, AGENT_STATUS_METADATA_KEY, AgentAnnouncement, AgentMetadata,
-        AgentStatus,
+        AgentStatus, is_reserved_metadata_key,
     },
 };
 
@@ -19,6 +19,118 @@ pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_TTL: Duration = Duration::from_secs(120);
 /// Default broadcast channel capacity for lifecycle events.
 pub const DEFAULT_EVENT_CAPACITY: usize = 256;
+
+/// Determines whether a configured shared secret only signs local announcements
+/// or also verifies incoming peers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SharedSecretMode {
+    /// Sign local announcements, but do not reject unsigned or invalid remote peers.
+    SignOnly,
+    /// Sign local announcements and require valid signatures from remote peers.
+    SignAndVerify,
+}
+
+/// Optional shared-secret authentication settings for LAN announcements.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SharedSecretAuth {
+    secret: String,
+    mode: SharedSecretMode,
+}
+
+impl std::fmt::Debug for SharedSecretAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedSecretAuth")
+            .field("secret", &"<redacted>")
+            .field("mode", &self.mode)
+            .finish()
+    }
+}
+
+impl SharedSecretAuth {
+    /// Creates validated shared-secret authentication settings.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when the secret is empty after trimming.
+    pub fn new(secret: impl Into<String>, mode: SharedSecretMode) -> Result<Self, ZeroConfError> {
+        Ok(Self {
+            secret: normalize_shared_secret(secret.into())?,
+            mode,
+        })
+    }
+
+    /// Returns the configured verification mode.
+    #[must_use]
+    pub const fn mode(&self) -> SharedSecretMode {
+        self.mode
+    }
+
+    /// Returns whether remote peers should be verified.
+    #[must_use]
+    pub const fn verifies_incoming(&self) -> bool {
+        matches!(self.mode, SharedSecretMode::SignAndVerify)
+    }
+
+    pub(crate) fn secret(&self) -> &str {
+        &self.secret
+    }
+}
+
+/// Selects which network interfaces the embedded mDNS daemon should include or exclude.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NetworkInterface {
+    /// Match all interfaces.
+    All,
+    /// Match all IPv4 interfaces.
+    IPv4,
+    /// Match all IPv6 interfaces.
+    IPv6,
+    /// Match a specific interface by system name, such as `en0`.
+    Name(String),
+    /// Match an interface by one of its assigned IP addresses.
+    Addr(IpAddr),
+    /// Match the IPv4 loopback interface.
+    LoopbackV4,
+    /// Match the IPv6 loopback interface.
+    LoopbackV6,
+    /// Match an IPv4 interface by index.
+    IndexV4(u32),
+    /// Match an IPv6 interface by index.
+    IndexV6(u32),
+}
+
+impl From<&str> for NetworkInterface {
+    fn from(value: &str) -> Self {
+        Self::Name(value.to_owned())
+    }
+}
+
+impl From<String> for NetworkInterface {
+    fn from(value: String) -> Self {
+        Self::Name(value)
+    }
+}
+
+impl From<IpAddr> for NetworkInterface {
+    fn from(value: IpAddr) -> Self {
+        Self::Addr(value)
+    }
+}
+
+impl NetworkInterface {
+    pub(crate) fn to_mdns_if_kind(&self) -> mdns_sd::IfKind {
+        match self {
+            Self::All => mdns_sd::IfKind::All,
+            Self::IPv4 => mdns_sd::IfKind::IPv4,
+            Self::IPv6 => mdns_sd::IfKind::IPv6,
+            Self::Name(name) => mdns_sd::IfKind::Name(name.clone()),
+            Self::Addr(addr) => mdns_sd::IfKind::Addr(*addr),
+            Self::LoopbackV4 => mdns_sd::IfKind::LoopbackV4,
+            Self::LoopbackV6 => mdns_sd::IfKind::LoopbackV6,
+            Self::IndexV4(index) => mdns_sd::IfKind::IndexV4(*index),
+            Self::IndexV6(index) => mdns_sd::IfKind::IndexV6(*index),
+        }
+    }
+}
 
 /// Immutable runtime configuration for a mesh node.
 ///
@@ -37,7 +149,11 @@ pub struct ZeroConfConfig {
     heartbeat_interval: Duration,
     ttl: Duration,
     event_capacity: usize,
+    capabilities: Vec<String>,
     metadata: AgentMetadata,
+    enabled_interfaces: Vec<NetworkInterface>,
+    disabled_interfaces: Vec<NetworkInterface>,
+    shared_secret_auth: Option<SharedSecretAuth>,
 }
 
 impl ZeroConfConfig {
@@ -61,6 +177,7 @@ impl ZeroConfConfig {
         heartbeat_interval: Duration,
         ttl: Duration,
         event_capacity: usize,
+        capabilities: Vec<String>,
         metadata: AgentMetadata,
     ) -> Result<Self, ZeroConfError> {
         let config = Self {
@@ -75,7 +192,11 @@ impl ZeroConfConfig {
             heartbeat_interval,
             ttl,
             event_capacity,
+            capabilities,
             metadata,
+            enabled_interfaces: Vec::new(),
+            disabled_interfaces: Vec::new(),
+            shared_secret_auth: None,
         };
 
         config.validate()?;
@@ -114,6 +235,15 @@ impl ZeroConfConfig {
 
         if self.metadata.keys().any(|key| key.trim().is_empty()) {
             return Err(ZeroConfError::EmptyMetadataKey);
+        }
+
+        if let Some(key) = self
+            .metadata
+            .keys()
+            .find(|key| is_reserved_metadata_key(key))
+            .cloned()
+        {
+            return Err(ZeroConfError::ReservedMetadataKey { key });
         }
 
         Ok(())
@@ -185,10 +315,79 @@ impl ZeroConfConfig {
         self.event_capacity
     }
 
+    /// Returns the typed capabilities configured for the local node.
+    #[must_use]
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
     /// Returns any extra metadata configured for the local node.
     #[must_use]
     pub const fn metadata(&self) -> &AgentMetadata {
         &self.metadata
+    }
+
+    /// Returns the shared-secret authentication settings, if enabled.
+    #[must_use]
+    pub fn shared_secret_auth(&self) -> Option<&SharedSecretAuth> {
+        self.shared_secret_auth.as_ref()
+    }
+
+    /// Returns the interfaces explicitly enabled for the embedded mDNS daemon.
+    #[must_use]
+    pub fn enabled_interfaces(&self) -> &[NetworkInterface] {
+        &self.enabled_interfaces
+    }
+
+    /// Returns the interfaces explicitly excluded for the embedded mDNS daemon.
+    #[must_use]
+    pub fn disabled_interfaces(&self) -> &[NetworkInterface] {
+        &self.disabled_interfaces
+    }
+
+    /// Adds an interface inclusion rule to the configuration.
+    #[must_use]
+    pub fn with_enabled_interface(mut self, interface: impl Into<NetworkInterface>) -> Self {
+        self.enabled_interfaces.push(interface.into());
+        self
+    }
+
+    /// Adds multiple interface inclusion rules to the configuration.
+    #[must_use]
+    pub fn with_enabled_interfaces<I, T>(mut self, interfaces: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<NetworkInterface>,
+    {
+        self.enabled_interfaces
+            .extend(interfaces.into_iter().map(Into::into));
+        self
+    }
+
+    /// Adds an interface exclusion rule to the configuration.
+    #[must_use]
+    pub fn with_disabled_interface(mut self, interface: impl Into<NetworkInterface>) -> Self {
+        self.disabled_interfaces.push(interface.into());
+        self
+    }
+
+    /// Adds multiple interface exclusion rules to the configuration.
+    #[must_use]
+    pub fn with_disabled_interfaces<I, T>(mut self, interfaces: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<NetworkInterface>,
+    {
+        self.disabled_interfaces
+            .extend(interfaces.into_iter().map(Into::into));
+        self
+    }
+
+    /// Enables shared-secret authentication for the local node.
+    #[must_use]
+    pub fn with_shared_secret_auth(mut self, auth: SharedSecretAuth) -> Self {
+        self.shared_secret_auth = Some(auth);
+        self
     }
 
     /// Returns the computed DNS-SD instance name for this agent.
@@ -213,6 +412,7 @@ impl ZeroConfConfig {
             AGENT_STATUS_METADATA_KEY.to_owned(),
             self.initial_status.as_str().to_owned(),
         );
+        crate::types::sync_capabilities_metadata(&mut metadata, &self.capabilities);
 
         AgentAnnouncement::new(
             self.instance_name(),
@@ -232,6 +432,14 @@ fn normalize_required(value: String, field: &'static str) -> Result<String, Zero
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ZeroConfError::EmptyField { field });
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn normalize_shared_secret(secret: String) -> Result<String, ZeroConfError> {
+    let trimmed = secret.trim();
+    if trimmed.is_empty() {
+        return Err(ZeroConfError::EmptySharedSecret);
     }
     Ok(trimmed.to_owned())
 }
@@ -262,6 +470,7 @@ mod tests {
             DEFAULT_HEARTBEAT_INTERVAL,
             DEFAULT_TTL,
             DEFAULT_EVENT_CAPACITY,
+            Vec::new(),
             AgentMetadata::new(),
         )
         .expect_err("port zero must be rejected");
@@ -283,6 +492,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
             DEFAULT_EVENT_CAPACITY,
+            Vec::new(),
             AgentMetadata::new(),
         )
         .expect_err("ttl must be greater than heartbeat");
@@ -307,6 +517,7 @@ mod tests {
             DEFAULT_HEARTBEAT_INTERVAL,
             DEFAULT_TTL,
             DEFAULT_EVENT_CAPACITY,
+            Vec::new(),
             AgentMetadata::new(),
         )
         .expect_err("mDNS port zero must be rejected");
@@ -328,6 +539,7 @@ mod tests {
             DEFAULT_HEARTBEAT_INTERVAL,
             DEFAULT_TTL,
             0,
+            Vec::new(),
             AgentMetadata::new(),
         )
         .expect_err("event capacity zero must be rejected");

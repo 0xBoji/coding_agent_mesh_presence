@@ -49,14 +49,15 @@ mod types;
 pub use builder::ZeroConfMeshBuilder;
 pub use config::{
     DEFAULT_EVENT_CAPACITY, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_MDNS_PORT, DEFAULT_SERVICE_TYPE,
-    DEFAULT_TTL, ZeroConfConfig,
+    DEFAULT_TTL, NetworkInterface, SharedSecretAuth, SharedSecretMode, ZeroConfConfig,
 };
 pub use error::ZeroConfError;
 pub use events::{AgentEvent, DepartureReason, EventOrigin};
 pub use mesh::ZeroConfMesh;
 pub use registry::{Registry, RegistryUpsert};
 pub use types::{
-    AGENT_BRANCH_METADATA_KEY, AGENT_ID_METADATA_KEY, AGENT_PROJECT_METADATA_KEY,
-    AGENT_ROLE_METADATA_KEY, AGENT_STATUS_METADATA_KEY, AgentAnnouncement, AgentInfo,
+    AGENT_AUTH_SCHEME_METADATA_KEY, AGENT_BRANCH_METADATA_KEY, AGENT_CAPABILITIES_METADATA_KEY,
+    AGENT_ID_METADATA_KEY, AGENT_PROJECT_METADATA_KEY, AGENT_ROLE_METADATA_KEY,
+    AGENT_SIGNATURE_METADATA_KEY, AGENT_STATUS_METADATA_KEY, AgentAnnouncement, AgentInfo,
     AgentMetadata, AgentStatus,
 };

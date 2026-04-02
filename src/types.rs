@@ -1,9 +1,14 @@
 use std::{collections::BTreeMap, fmt, net::IpAddr, str::FromStr, time::Instant};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
 use mdns_sd::{ResolvedService, ServiceInfo, TxtProperties, TxtProperty};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
-use crate::error::ZeroConfError;
+use crate::{config::SharedSecretAuth, error::ZeroConfError};
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Metadata key used for the advertised agent identifier.
 pub const AGENT_ID_METADATA_KEY: &str = "agent_id";
@@ -15,6 +20,12 @@ pub const AGENT_PROJECT_METADATA_KEY: &str = "current_project";
 pub const AGENT_BRANCH_METADATA_KEY: &str = "current_branch";
 /// Metadata key used for the advertised agent status.
 pub const AGENT_STATUS_METADATA_KEY: &str = "status";
+/// Metadata key used for typed advertised agent capabilities.
+pub const AGENT_CAPABILITIES_METADATA_KEY: &str = "capabilities";
+/// Metadata key used to declare the shared-secret auth mode on the wire.
+pub const AGENT_AUTH_SCHEME_METADATA_KEY: &str = "zcm_auth";
+/// Metadata key used to carry the shared-secret signature on the wire.
+pub const AGENT_SIGNATURE_METADATA_KEY: &str = "zcm_sig";
 
 /// Additional metadata attached to an agent advertisement.
 pub type AgentMetadata = BTreeMap<String, String>;
@@ -73,6 +84,7 @@ pub struct AgentAnnouncement {
     project: String,
     branch: String,
     status: AgentStatus,
+    capabilities: Vec<String>,
     port: u16,
     addresses: Vec<IpAddr>,
     metadata: AgentMetadata,
@@ -112,6 +124,10 @@ impl AgentAnnouncement {
             return Err(ZeroConfError::EmptyMetadataKey);
         }
 
+        let capabilities = capabilities_from_metadata(&metadata)?;
+        let mut metadata = metadata;
+        sync_capabilities_metadata(&mut metadata, &capabilities);
+
         Ok(Self {
             instance_name,
             agent_id,
@@ -119,6 +135,7 @@ impl AgentAnnouncement {
             project,
             branch,
             status,
+            capabilities,
             port,
             addresses,
             metadata,
@@ -161,6 +178,12 @@ impl AgentAnnouncement {
         self.status
     }
 
+    /// Returns the advertised typed capabilities.
+    #[must_use]
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
     /// Returns the advertised service port.
     #[must_use]
     pub const fn port(&self) -> u16 {
@@ -186,6 +209,48 @@ impl AgentAnnouncement {
             AGENT_STATUS_METADATA_KEY.to_owned(),
             status.as_str().to_owned(),
         );
+    }
+
+    /// Replaces the advertised capability list.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when any capability is empty or contains a comma.
+    pub fn set_capabilities<I, S>(&mut self, capabilities: I) -> Result<(), ZeroConfError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.capabilities = canonicalize_capabilities(capabilities)?;
+        sync_capabilities_metadata(&mut self.metadata, &self.capabilities);
+        Ok(())
+    }
+
+    /// Adds a single capability to the announcement.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when the capability is empty or contains a comma.
+    pub fn add_capability(&mut self, capability: impl Into<String>) -> Result<(), ZeroConfError> {
+        let capability = normalize_capability(capability.into())?;
+        if !self.capabilities.iter().any(|entry| entry == &capability) {
+            self.capabilities.push(capability);
+            self.capabilities.sort();
+            sync_capabilities_metadata(&mut self.metadata, &self.capabilities);
+        }
+        Ok(())
+    }
+
+    /// Removes a capability from the announcement.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when the provided capability is empty after trimming.
+    pub fn remove_capability(
+        &mut self,
+        capability: impl Into<String>,
+    ) -> Result<(), ZeroConfError> {
+        let capability = normalize_capability(capability.into())?;
+        self.capabilities.retain(|entry| entry != &capability);
+        sync_capabilities_metadata(&mut self.metadata, &self.capabilities);
+        Ok(())
     }
 
     /// Updates the current project namespace and synchronizes the canonical TXT key.
@@ -222,7 +287,7 @@ impl AgentAnnouncement {
         value: impl Into<String>,
     ) -> Result<(), ZeroConfError> {
         let key = normalize_metadata_key(key.into())?;
-        if is_canonical_metadata_key(&key) {
+        if is_reserved_metadata_key(&key) {
             return Err(ZeroConfError::ReservedMetadataKey { key });
         }
 
@@ -236,12 +301,42 @@ impl AgentAnnouncement {
     /// Returns [`ZeroConfError`] when the key is empty or reserved by the crate.
     pub fn remove_metadata(&mut self, key: impl Into<String>) -> Result<(), ZeroConfError> {
         let key = normalize_metadata_key(key.into())?;
-        if is_canonical_metadata_key(&key) {
+        if is_reserved_metadata_key(&key) {
             return Err(ZeroConfError::ReservedMetadataKey { key });
         }
 
         self.metadata.remove(&key);
         Ok(())
+    }
+
+    /// Applies shared-secret signing metadata to the announcement.
+    pub fn apply_shared_secret_auth(&mut self, auth: &SharedSecretAuth) {
+        self.metadata.insert(
+            AGENT_AUTH_SCHEME_METADATA_KEY.to_owned(),
+            "shared_secret_hmac_sha256".to_owned(),
+        );
+        self.metadata.insert(
+            AGENT_SIGNATURE_METADATA_KEY.to_owned(),
+            self.shared_secret_signature(auth.secret()),
+        );
+    }
+
+    /// Verifies the shared-secret signature metadata carried by this announcement.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when required auth metadata is missing or invalid.
+    pub fn verify_shared_secret_auth(&self, auth: &SharedSecretAuth) -> Result<(), ZeroConfError> {
+        let _scheme = required_auth_metadata(&self.metadata, AGENT_AUTH_SCHEME_METADATA_KEY)?;
+        let signature = required_auth_metadata(&self.metadata, AGENT_SIGNATURE_METADATA_KEY)?;
+        let expected = self.shared_secret_signature(auth.secret());
+
+        if signature == expected {
+            Ok(())
+        } else {
+            Err(ZeroConfError::InvalidSharedSecretSignature {
+                agent_id: self.agent_id.clone(),
+            })
+        }
     }
 
     /// Converts this announcement into `mdns-sd` TXT properties.
@@ -256,6 +351,7 @@ impl AgentAnnouncement {
             AGENT_STATUS_METADATA_KEY.to_owned(),
             self.status.as_str().to_owned(),
         );
+        sync_capabilities_metadata(&mut metadata, &self.capabilities);
 
         metadata.into_iter().map(TxtProperty::from).collect()
     }
@@ -337,6 +433,7 @@ impl AgentAnnouncement {
             project: self.project,
             branch: self.branch,
             status: self.status,
+            capabilities: self.capabilities,
             port: self.port,
             addresses: self.addresses,
             metadata: self.metadata,
@@ -354,6 +451,7 @@ pub struct AgentInfo {
     project: String,
     branch: String,
     status: AgentStatus,
+    capabilities: Vec<String>,
     port: u16,
     addresses: Vec<IpAddr>,
     metadata: AgentMetadata,
@@ -397,6 +495,12 @@ impl AgentInfo {
         self.status
     }
 
+    /// Returns the typed capabilities currently advertised by this agent.
+    #[must_use]
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
     /// Returns the advertised service port.
     #[must_use]
     pub const fn port(&self) -> u16 {
@@ -421,6 +525,12 @@ impl AgentInfo {
         self.last_seen
     }
 
+    /// Returns whether the agent advertises the provided capability.
+    #[must_use]
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|entry| entry == capability)
+    }
+
     pub(crate) fn same_payload_as(&self, other: &Self) -> bool {
         self.instance_name == other.instance_name
             && self.id == other.id
@@ -428,6 +538,7 @@ impl AgentInfo {
             && self.project == other.project
             && self.branch == other.branch
             && self.status == other.status
+            && self.capabilities == other.capabilities
             && self.port == other.port
             && self.addresses == other.addresses
             && self.metadata == other.metadata
@@ -459,7 +570,7 @@ fn normalize_metadata_key(key: String) -> Result<String, ZeroConfError> {
     Ok(trimmed.to_owned())
 }
 
-fn is_canonical_metadata_key(key: &str) -> bool {
+pub(crate) fn is_reserved_metadata_key(key: &str) -> bool {
     matches!(
         key,
         AGENT_ID_METADATA_KEY
@@ -467,7 +578,70 @@ fn is_canonical_metadata_key(key: &str) -> bool {
             | AGENT_PROJECT_METADATA_KEY
             | AGENT_BRANCH_METADATA_KEY
             | AGENT_STATUS_METADATA_KEY
+            | AGENT_CAPABILITIES_METADATA_KEY
+            | AGENT_AUTH_SCHEME_METADATA_KEY
+            | AGENT_SIGNATURE_METADATA_KEY
     )
+}
+
+fn is_auth_metadata_key(key: &str) -> bool {
+    matches!(
+        key,
+        AGENT_AUTH_SCHEME_METADATA_KEY | AGENT_SIGNATURE_METADATA_KEY
+    )
+}
+
+pub(crate) fn canonicalize_capabilities<I, S>(capabilities: I) -> Result<Vec<String>, ZeroConfError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut normalized = capabilities
+        .into_iter()
+        .map(|capability| normalize_capability(capability.into()))
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+pub(crate) fn sync_capabilities_metadata(metadata: &mut AgentMetadata, capabilities: &[String]) {
+    if capabilities.is_empty() {
+        metadata.remove(AGENT_CAPABILITIES_METADATA_KEY);
+    } else {
+        metadata.insert(
+            AGENT_CAPABILITIES_METADATA_KEY.to_owned(),
+            capabilities.join(","),
+        );
+    }
+}
+
+fn capabilities_from_metadata(metadata: &AgentMetadata) -> Result<Vec<String>, ZeroConfError> {
+    match metadata.get(AGENT_CAPABILITIES_METADATA_KEY) {
+        Some(raw_capabilities) => canonicalize_capabilities(
+            raw_capabilities
+                .split(',')
+                .map(str::trim)
+                .filter(|capability| !capability.is_empty())
+                .map(ToOwned::to_owned),
+        ),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn normalize_capability(capability: String) -> Result<String, ZeroConfError> {
+    let trimmed = capability.trim();
+    if trimmed.is_empty() {
+        return Err(ZeroConfError::EmptyCapability);
+    }
+
+    if trimmed.contains(',') {
+        return Err(ZeroConfError::InvalidCapability {
+            value: trimmed.to_owned(),
+        });
+    }
+
+    Ok(trimmed.to_owned())
 }
 
 fn metadata_from_txt_properties(
@@ -501,6 +675,49 @@ fn required_metadata<'a>(
         .ok_or(ZeroConfError::MissingTxtProperty { key })
 }
 
+fn required_auth_metadata<'a>(
+    metadata: &'a AgentMetadata,
+    key: &'static str,
+) -> Result<&'a str, ZeroConfError> {
+    metadata
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ZeroConfError::MissingAuthMetadata { key })
+}
+
+impl AgentAnnouncement {
+    fn shared_secret_signature(&self, secret: &str) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .expect("HMAC accepts shared secrets of any size");
+        mac.update(self.signature_payload().as_bytes());
+        let signature = mac.finalize().into_bytes();
+        URL_SAFE_NO_PAD.encode(signature)
+    }
+
+    fn signature_payload(&self) -> String {
+        let mut payload = vec![
+            format!("instance_name={}", self.instance_name),
+            format!("agent_id={}", self.agent_id),
+            format!("role={}", self.role),
+            format!("project={}", self.project),
+            format!("branch={}", self.branch),
+            format!("status={}", self.status.as_str()),
+            format!("capabilities={}", self.capabilities.join(",")),
+            format!("port={}", self.port),
+        ];
+
+        payload.extend(
+            self.metadata
+                .iter()
+                .filter(|(key, _)| !is_reserved_metadata_key(key) && !is_auth_metadata_key(key))
+                .map(|(key, value)| format!("metadata:{key}={value}")),
+        );
+
+        payload.join("\n")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
@@ -508,10 +725,12 @@ mod tests {
     use mdns_sd::IntoTxtProperties;
 
     use super::*;
+    use crate::config::{SharedSecretAuth, SharedSecretMode};
 
     fn announcement() -> AgentAnnouncement {
         let mut metadata = AgentMetadata::new();
         metadata.insert("capability".into(), "review".into());
+        metadata.insert(AGENT_CAPABILITIES_METADATA_KEY.into(), "plan,review".into());
 
         AgentAnnouncement::new(
             "agent-1._agent-mesh._tcp.local.",
@@ -546,6 +765,10 @@ mod tests {
             Some("busy")
         );
         assert_eq!(service.get_property_val_str("capability"), Some("review"));
+        assert_eq!(
+            service.get_property_val_str(AGENT_CAPABILITIES_METADATA_KEY),
+            Some("plan,review")
+        );
     }
 
     #[test]
@@ -557,6 +780,7 @@ mod tests {
             ("current_branch", "main"),
             ("status", "busy"),
             ("capability", "review"),
+            ("capabilities", "plan,review"),
         ]
         .as_slice()
         .into_txt_properties();
@@ -577,6 +801,10 @@ mod tests {
         assert_eq!(
             announcement.metadata().get("capability"),
             Some(&"review".to_owned())
+        );
+        assert_eq!(
+            announcement.capabilities(),
+            &["plan".to_owned(), "review".to_owned()]
         );
     }
 
@@ -688,6 +916,52 @@ mod tests {
     }
 
     #[test]
+    fn agent_announcement_should_manage_typed_capabilities() {
+        let mut announcement = announcement();
+
+        announcement
+            .add_capability("debug")
+            .expect("capability should be added");
+        announcement
+            .remove_capability("plan")
+            .expect("capability removal should succeed");
+        announcement
+            .set_capabilities(["sync", "review", "sync"])
+            .expect("capabilities should be normalized");
+
+        assert_eq!(
+            announcement.capabilities(),
+            &["review".to_owned(), "sync".to_owned()]
+        );
+        assert_eq!(
+            announcement.metadata().get(AGENT_CAPABILITIES_METADATA_KEY),
+            Some(&"review,sync".to_owned())
+        );
+    }
+
+    #[test]
+    fn agent_announcement_should_apply_and_verify_shared_secret_auth() {
+        let mut announcement = announcement();
+        let auth = SharedSecretAuth::new("top-secret", SharedSecretMode::SignAndVerify)
+            .expect("auth should be valid");
+
+        announcement.apply_shared_secret_auth(&auth);
+
+        assert_eq!(
+            announcement.metadata().get(AGENT_AUTH_SCHEME_METADATA_KEY),
+            Some(&"shared_secret_hmac_sha256".to_owned())
+        );
+        assert!(
+            announcement
+                .metadata()
+                .contains_key(AGENT_SIGNATURE_METADATA_KEY)
+        );
+        announcement
+            .verify_shared_secret_auth(&auth)
+            .expect("signature should verify");
+    }
+
+    #[test]
     fn agent_announcement_should_reject_reserved_metadata_keys() {
         let mut announcement = announcement();
 
@@ -696,6 +970,33 @@ mod tests {
             .expect_err("canonical metadata keys should be rejected");
 
         assert!(matches!(err, ZeroConfError::ReservedMetadataKey { key } if key == "status"));
+
+        let err = announcement
+            .set_metadata(AGENT_CAPABILITIES_METADATA_KEY, "plan")
+            .expect_err("capabilities metadata key should be reserved");
+
+        assert!(matches!(err, ZeroConfError::ReservedMetadataKey { key } if key == "capabilities"));
+
+        let err = announcement
+            .set_metadata(AGENT_SIGNATURE_METADATA_KEY, "forged")
+            .expect_err("signature metadata key should be reserved");
+
+        assert!(matches!(err, ZeroConfError::ReservedMetadataKey { key } if key == "zcm_sig"));
+    }
+
+    #[test]
+    fn agent_announcement_should_reject_invalid_capability_names() {
+        let mut announcement = announcement();
+
+        let err = announcement
+            .add_capability("plan,review")
+            .expect_err("comma separated single capability should be rejected");
+        assert!(matches!(err, ZeroConfError::InvalidCapability { .. }));
+
+        let err = announcement
+            .set_capabilities(["", "review"])
+            .expect_err("empty capability should be rejected");
+        assert!(matches!(err, ZeroConfError::EmptyCapability));
     }
 
     #[test]
@@ -706,5 +1007,25 @@ mod tests {
             .expect("metadata removal should succeed");
 
         assert_eq!(announcement.metadata().get("capability"), None);
+    }
+
+    #[test]
+    fn agent_announcement_should_reject_invalid_shared_secret_signature() {
+        let mut announcement = announcement();
+        let auth = SharedSecretAuth::new("top-secret", SharedSecretMode::SignAndVerify)
+            .expect("auth should be valid");
+        let other_auth = SharedSecretAuth::new("different-secret", SharedSecretMode::SignAndVerify)
+            .expect("auth should be valid");
+
+        announcement.apply_shared_secret_auth(&auth);
+
+        let err = announcement
+            .verify_shared_secret_auth(&other_auth)
+            .expect_err("signature should fail with a different secret");
+
+        assert!(matches!(
+            err,
+            ZeroConfError::InvalidSharedSecretSignature { agent_id } if agent_id == "agent-1"
+        ));
     }
 }

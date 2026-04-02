@@ -205,7 +205,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 While the crate is still local to this repo, use a path dependency.
-When published, replace the path dependency with the crate version.
+The previously published crate name was `zero-conf-mesh`; the renamed
+`coding_agent_mesh_presence` package resumes with a fresh manual crates.io publish.
+After that publish lands, replace the path dependency with the crate version.
 
 ---
 
@@ -1281,6 +1283,10 @@ This should be a crates.io API token with publish scopes.
 
 The first crates.io publish for a brand-new crate is often done manually first.
 After that, automated release workflows are much smoother.
+
+Because this project renamed the published crate from `zero-conf-mesh` to
+`coding_agent_mesh_presence`, the first release under the new crate name must be
+published manually with a fresh version before `release-plz` can diff against crates.io again.
 
 ---
 

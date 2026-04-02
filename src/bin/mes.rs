@@ -7,13 +7,15 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fs,
+    io::Write,
     net::{IpAddr, Ipv4Addr, UdpSocket},
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{Shell, generate};
 use serde::Serialize;
 use tokio::time;
 use zero_conf_mesh::{
@@ -33,11 +35,14 @@ enum Command {
     /// Announce a local agent on the LAN and keep it online until interrupted.
     Announce(AnnounceCommand),
     /// Discover peers on the LAN and print the current registry as JSON.
+    #[command(alias = "who")]
     List(ListCommand),
     /// Discover a single peer by id and print it as JSON.
     Get(GetCommand),
     /// Watch discovery events and print newline-delimited JSON.
     Watch(WatchCommand),
+    /// Generate shell completion scripts for mes.
+    Completions(CompletionsCommand),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -187,6 +192,16 @@ struct WatchCommand {
     /// Write the full discovered registry state to a JSON file on every change.
     #[arg(long)]
     write_state: Option<PathBuf>,
+    /// Append newline-delimited JSON events to a log file.
+    #[arg(long)]
+    write_events: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct CompletionsCommand {
+    /// Shell to generate completions for.
+    #[arg(value_enum)]
+    shell: Shell,
 }
 
 #[derive(Debug, Serialize)]
@@ -231,6 +246,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Command::List(command) => run_list(command).await?,
         Command::Get(command) => run_get(command).await?,
         Command::Watch(command) => run_watch(command).await?,
+        Command::Completions(command) => run_completions(command)?,
     }
 
     Ok(())
@@ -327,6 +343,9 @@ async fn run_watch(command: WatchCommand) -> Result<(), Box<dyn Error>> {
     if let Some(path) = command.write_state.as_deref() {
         write_state_snapshot(path, &snapshot.agents)?;
     }
+    if let Some(path) = command.write_events.as_deref() {
+        append_json_line(path, &snapshot)?;
+    }
 
     let mut events = mesh.subscribe();
     loop {
@@ -341,6 +360,9 @@ async fn run_watch(command: WatchCommand) -> Result<(), Box<dyn Error>> {
                                 let agents = mesh.agents().await.iter().map(to_agent_record).collect::<Vec<_>>();
                                 write_state_snapshot(path, &agents)?;
                             }
+                            if let Some(path) = command.write_events.as_deref() {
+                                append_json_line(path, &record)?;
+                            }
                         }
                     }
                     Err(_) => break,
@@ -350,6 +372,12 @@ async fn run_watch(command: WatchCommand) -> Result<(), Box<dyn Error>> {
     }
 
     mesh.shutdown().await?;
+    Ok(())
+}
+
+fn run_completions(command: CompletionsCommand) -> Result<(), Box<dyn Error>> {
+    let mut cli = Cli::command();
+    generate(command.shell, &mut cli, "mes", &mut std::io::stdout());
     Ok(())
 }
 
@@ -650,6 +678,23 @@ fn write_state_snapshot(path: &Path, agents: &[AgentRecord]) -> Result<(), Box<d
     Ok(())
 }
 
+fn append_json_line<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    serde_json::to_writer(&mut file, value)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
 fn temporary_state_path(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
@@ -670,6 +715,10 @@ fn ephemeral_udp_port() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        env,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn key_value_parser_should_accept_equals_form() {
@@ -701,5 +750,26 @@ mod tests {
             temporary_state_path(path),
             PathBuf::from("/tmp/.agent_mesh_state.json.tmp")
         );
+    }
+
+    #[test]
+    fn append_json_line_should_write_jsonl() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("mes-events-{unique}.jsonl"));
+        let payload = SnapshotRecord {
+            kind: "snapshot",
+            agents: Vec::new(),
+        };
+
+        append_json_line(&path, &payload).expect("json line should be written");
+
+        let contents = fs::read_to_string(&path).expect("json line file should exist");
+        assert!(contents.ends_with('\n'));
+        assert!(contents.contains("\"kind\":\"snapshot\""));
+
+        let _ = fs::remove_file(path);
     }
 }

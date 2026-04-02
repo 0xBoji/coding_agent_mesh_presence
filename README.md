@@ -503,8 +503,10 @@ So `mes` gives you a text-first interface over the same discovery engine.
 
 - `mes announce`
 - `mes list`
+- `mes who`
 - `mes get`
 - `mes watch`
+- `mes completions`
 
 ### `mes announce`
 
@@ -542,6 +544,12 @@ mes list --role reviewer
 mes list --project alpha --capability review
 mes list --metadata capability=planning
 mes list --metadata-regex capability='plan.*'
+```
+
+`mes who` is an alias for the same lookup flow, intended to feel more natural in agent prompts:
+
+```bash
+mes who --role reviewer --project alpha
 ```
 
 Example output:
@@ -592,6 +600,12 @@ You can also keep a continuously refreshed state file for very simple agents:
 mes watch --write-state /tmp/agent_mesh_state.json
 ```
 
+And you can persist the event stream itself as JSONL:
+
+```bash
+mes watch --write-events /tmp/agent_mesh_events.jsonl
+```
+
 This is useful for tmux panes, local supervisors, and agent loops that want to react to:
 
 - joins,
@@ -606,6 +620,18 @@ cat /tmp/agent_mesh_state.json
 ```
 
 instead of keeping a long-running JSON event parser in memory.
+
+### `mes completions`
+
+Generate shell completions:
+
+```bash
+mes completions bash
+mes completions zsh
+mes completions fish
+```
+
+This is especially handy if humans and agents share the same shell environment.
 
 ### Shared-secret support in the CLI
 

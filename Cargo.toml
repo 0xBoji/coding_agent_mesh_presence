@@ -24,6 +24,7 @@ include = [
 [dependencies]
 base64 = "0.22.1"
 clap = { version = "4.5.39", features = ["derive"] }
+clap_complete = "4.5.59"
 hmac = "0.12.1"
 mdns-sd = "0.18.2"
 regex = "1.12.2"

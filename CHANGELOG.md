@@ -16,6 +16,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - First-party `mes` CLI with JSON-friendly `announce`, `list`, `get`, and `watch` commands for shell/LLM-driven agents.
 - Discovery-only runtime mode so observer/query processes do not announce themselves on the LAN.
 - `mes watch --write-state ...` support for file-based JSON snapshots aimed at simple shell/LLM agents.
+- `mes who` alias, `mes watch --write-events ...` JSONL logging, and `mes completions ...` generation.
 
 ### Changed
 - `capabilities` is now treated as a canonical first-class presence field instead of only ad-hoc metadata.
@@ -28,6 +29,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - Rotated shared-secret acceptance during transition windows.
 - CLI parser coverage for metadata and interface selectors.
 - CLI state-file path helper coverage.
+- CLI JSONL event-log helper coverage.
 
 ## [0.1.2](https://github.com/0xBoji/zero-conf-mesh/compare/v0.1.1...v0.1.2) - 2026-04-02
 

@@ -6,7 +6,9 @@
 use std::{
     collections::BTreeMap,
     error::Error,
+    fs,
     net::{IpAddr, Ipv4Addr, UdpSocket},
+    path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
@@ -182,6 +184,9 @@ struct GetCommand {
 struct WatchCommand {
     #[command(flatten)]
     discovery: DiscoveryOptions,
+    /// Write the full discovered registry state to a JSON file on every change.
+    #[arg(long)]
+    write_state: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,6 +324,9 @@ async fn run_watch(command: WatchCommand) -> Result<(), Box<dyn Error>> {
         agents: mesh.agents().await.iter().map(to_agent_record).collect(),
     };
     print_json_line(&snapshot)?;
+    if let Some(path) = command.write_state.as_deref() {
+        write_state_snapshot(path, &snapshot.agents)?;
+    }
 
     let mut events = mesh.subscribe();
     loop {
@@ -329,6 +337,10 @@ async fn run_watch(command: WatchCommand) -> Result<(), Box<dyn Error>> {
                     Ok(event) => {
                         if let Some(record) = to_event_record(&event) {
                             print_json_line(&record)?;
+                            if let Some(path) = command.write_state.as_deref() {
+                                let agents = mesh.agents().await.iter().map(to_agent_record).collect::<Vec<_>>();
+                                write_state_snapshot(path, &agents)?;
+                            }
                         }
                     }
                     Err(_) => break,
@@ -610,15 +622,41 @@ fn print_json_line<T: Serialize>(value: &T) -> Result<(), Box<dyn Error>> {
 
 fn print_banner() {
     eprintln!(
-        "\x1b[96m\
-███╗   ███╗███████╗███████╗\n\
-████╗ ████║██╔════╝██╔════╝\n\
-██╔████╔██║█████╗  ███████╗\n\
-██║╚██╔╝██║██╔══╝  ╚════██║\n\
-██║ ╚═╝ ██║███████╗███████║\n\
-╚═╝     ╚═╝╚══════╝╚══════╝\n\
-\x1b[94mzero-conf mesh agent cli\x1b[0m\n"
+        "\x1b[95m\
+███╗   ███╗███████╗ ██████╗ \n\
+████╗ ████║██╔════╝██╔════╝ \n\
+██╔████╔██║█████╗  ╚█████╗  \n\
+██║╚██╔╝██║██╔══╝   ╚═══██╗ \n\
+██║ ╚═╝ ██║███████╗██████╔╝ \n\
+╚═╝     ╚═╝╚══════╝╚═════╝  \n\
+\x1b[94m╔══════════════════════════════════════════════╗\n\
+║  zero-conf mesh agent cli • shell-first JSON ║\n\
+╚══════════════════════════════════════════════╝\x1b[0m\n"
     );
+}
+
+fn write_state_snapshot(path: &Path, agents: &[AgentRecord]) -> Result<(), Box<dyn Error>> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        fs::create_dir_all(parent)?;
+    }
+
+    let payload = serde_json::to_vec_pretty(agents)?;
+    let tmp_path = temporary_state_path(path);
+    fs::write(&tmp_path, payload)?;
+    fs::rename(tmp_path, path)?;
+    Ok(())
+}
+
+fn temporary_state_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("mes-state.json");
+    let tmp_name = format!(".{file_name}.tmp");
+    path.with_file_name(tmp_name)
 }
 
 fn ephemeral_udp_port() -> u16 {
@@ -654,5 +692,14 @@ mod tests {
             parse_network_interface("name:en0").expect("interface should parse"),
             NetworkInterface::Name(name) if name == "en0"
         ));
+    }
+
+    #[test]
+    fn temporary_state_path_should_stay_next_to_target_file() {
+        let path = Path::new("/tmp/agent_mesh_state.json");
+        assert_eq!(
+            temporary_state_path(path),
+            PathBuf::from("/tmp/.agent_mesh_state.json.tmp")
+        );
     }
 }

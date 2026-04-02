@@ -586,12 +586,26 @@ Watch the mesh as newline-delimited JSON:
 mes watch
 ```
 
+You can also keep a continuously refreshed state file for very simple agents:
+
+```bash
+mes watch --write-state /tmp/agent_mesh_state.json
+```
+
 This is useful for tmux panes, local supervisors, and agent loops that want to react to:
 
 - joins,
 - updates,
 - departures,
 - rolling capability or status changes.
+
+It is also useful for file-oriented agents that prefer:
+
+```bash
+cat /tmp/agent_mesh_state.json
+```
+
+instead of keeping a long-running JSON event parser in memory.
 
 ### Shared-secret support in the CLI
 
@@ -636,6 +650,17 @@ mes list --enable-interface addr:192.168.1.10
 - they are meant to behave like observers.
 
 That keeps query-oriented agent commands from polluting the LAN registry.
+
+### Banner / ASCII effect
+
+`mes` prints a large colorful ASCII banner at startup.
+
+Important detail:
+
+- the banner goes to **stderr**
+- JSON goes to **stdout**
+
+So humans still get a nice terminal experience, while agents can safely parse command output.
 
 ---
 

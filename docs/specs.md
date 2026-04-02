@@ -87,6 +87,8 @@ For observer-style use cases, the runtime also supports discovery-only mode wher
 - the local node is not advertised,
 - the local node is not inserted into the registry.
 
+The `mes` CLI builds on this mode for `list`, `get`, and `watch` commands, and can optionally mirror the current registry to a JSON file for file-oriented agents.
+
 ## 4. Data Model
 
 ### 4.1 Network Identity
@@ -423,6 +425,7 @@ The crate should treat docs as part of the test surface:
 - examples in `examples/` should stay buildable under `cargo test`,
 - README snippets should match the current public API.
 - CLI helper tests should cover parsers for metadata and interface selectors.
+- CLI state-file helpers should preserve atomic JSON snapshots when possible.
 
 In practice, the project should keep passing:
 - `cargo test`

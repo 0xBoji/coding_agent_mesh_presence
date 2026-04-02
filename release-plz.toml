@@ -7,6 +7,6 @@ git_release_enable = true
 git_tag_enable = true
 
 [[package]]
-name = "zero-conf-mesh"
+name = "coding_agent_mesh_presence"
 changelog_path = "CHANGELOG.md"
 publish = true

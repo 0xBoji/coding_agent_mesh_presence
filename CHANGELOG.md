@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.1.5](https://github.com/0xBoji/zero-conf-mesh/compare/v0.1.4...v0.1.5) - 2026-04-02
+
+### Added
+
+- add mes init bootstrap workflow
 ### Added
 
 - `mes init` to generate a repo-local `.mes.toml` file and inject project-specific `mes` usage guidance into `AGENTS.md`.

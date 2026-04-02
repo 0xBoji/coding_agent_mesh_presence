@@ -1,11 +1,11 @@
 [package]
-name = "zero-conf-mesh"
+name = "coding_agent_mesh_presence"
 version = "0.1.5"
 edition = "2024"
 description = "Zero-configuration LAN service discovery for multi-agent systems via mDNS/DNS-SD"
 license = "MIT"
-repository = "https://github.com/0xBoji/zero-conf-mesh"
-homepage = "https://github.com/0xBoji/zero-conf-mesh"
+repository = "https://github.com/0xBoji/coding_agent_mesh_presence"
+homepage = "https://github.com/0xBoji/coding_agent_mesh_presence"
 readme = "README.md"
 keywords = ["mdns", "dns-sd", "service-discovery", "agent", "ai"]
 categories = ["network-programming", "asynchronous"]

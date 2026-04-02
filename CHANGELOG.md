@@ -7,6 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/0xBoji/zero-conf-mesh/compare/v0.1.3...v0.1.4) - 2026-04-02
+
+### Added
+
+- stream live events from mes serve
+- add local rest bridge to mes
+- add exec hooks to mes watch
+
 ## [0.1.3](https://github.com/0xBoji/zero-conf-mesh/compare/v0.1.2...v0.1.3) - 2026-04-02
 
 ### Added

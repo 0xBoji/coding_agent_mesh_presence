@@ -261,6 +261,47 @@ async fn mesh_should_ignore_unsigned_peers_when_shared_secret_verification_is_en
 }
 
 #[tokio::test]
+async fn mesh_should_accept_rotated_shared_secret_during_transition() -> Result<(), Box<dyn Error>>
+{
+    let mdns_port = available_udp_port();
+    let old_mesh = ZeroConfMesh::builder()
+        .agent_id("agent-old")
+        .role("worker")
+        .project("alpha")
+        .branch("main")
+        .port(8081)
+        .mdns_port(mdns_port)
+        .heartbeat_interval(Duration::from_millis(200))
+        .ttl(Duration::from_secs(2))
+        .shared_secret("mesh-secret-v1")
+        .build()
+        .await?;
+    let rotated_mesh = ZeroConfMesh::builder()
+        .agent_id("agent-rotated")
+        .role("worker")
+        .project("alpha")
+        .branch("main")
+        .port(8082)
+        .mdns_port(mdns_port)
+        .heartbeat_interval(Duration::from_millis(200))
+        .ttl(Duration::from_secs(2))
+        .shared_secret_rotation_with_mode(
+            "mesh-secret-v2",
+            ["mesh-secret-v1"],
+            SharedSecretMode::SignAndVerify,
+        )
+        .build()
+        .await?;
+
+    wait_for_agent(&rotated_mesh, "agent-old").await?;
+
+    old_mesh.shutdown().await?;
+    rotated_mesh.shutdown().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn mesh_should_discover_multiple_peers_on_same_mdns_port() -> Result<(), Box<dyn Error>> {
     let mdns_port = available_udp_port();
     let mesh_a = mesh("agent-a", "alpha", "main", 8081, mdns_port).await?;

@@ -530,6 +530,8 @@ Available builder setters:
 - `disable_interface(...)`
 - `shared_secret(...)`
 - `shared_secret_with_mode(...)`
+- `shared_secret_rotation(...)`
+- `shared_secret_rotation_with_mode(...)`
 - `metadata(key, value)`
 - `metadata_map(...)`
 
@@ -672,6 +674,43 @@ This is intentionally lightweight:
 - it helps prevent accidental or unauthorized peer acceptance on a shared LAN,
 - it does **not** encrypt traffic,
 - it does **not** try to provide full mutual-auth PKI semantics.
+
+### Shared-secret rotation
+
+The auth layer now also supports rotation-friendly verification.
+
+That means a node can:
+
+- sign **new** announcements with the current secret,
+- continue accepting peers signed with one or more **previous** secrets,
+- roll the mesh forward gradually instead of forcing a flag day.
+
+Example:
+
+```rust,no_run
+# use zero_conf_mesh::{SharedSecretMode, ZeroConfMesh};
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mesh = ZeroConfMesh::builder()
+    .agent_id("agent-01")
+    .role("worker")
+    .project("alpha")
+    .branch("main")
+    .port(8080)
+    .shared_secret_rotation_with_mode(
+        "mesh-secret-v2",
+        ["mesh-secret-v1"],
+        SharedSecretMode::SignAndVerify,
+    )
+    .build()
+    .await?;
+
+mesh.shutdown().await?;
+# Ok(())
+# }
+```
+
+This gives you a practical transition window for authenticated deployments on a LAN.
 
 ### Interface / network controls
 
@@ -833,7 +872,7 @@ Current limitations:
 - no encrypted advertisements
 - no reliable delivery semantics
 - no leader election or consensus
-- no asymmetric signature / key-rotation story yet
+- no asymmetric signature / public-key trust story yet
 
 ---
 
@@ -854,6 +893,7 @@ Current automated coverage includes:
 - remote typed capability propagation plus advanced query coverage,
 - shared-secret verified peer discovery,
 - unsigned peers being ignored when verification is enabled,
+- rotated shared secrets being accepted during transition windows,
 - multi-peer discovery on one custom mDNS port,
 - project isolation across shared-LAN discovery,
 - malformed remote TXT payloads being ignored,
@@ -941,7 +981,7 @@ Things that would be natural to add next, depending on real-world usage:
 
 - richer status vocabularies or user-defined states,
 - stronger authentication options beyond shared secrets,
-- key rotation / trust-policy helpers for authenticated deployments,
+- asymmetric trust-policy helpers for authenticated deployments,
 - capability grouping or namespacing conventions,
 - richer interface policy presets if deployments need them.
 

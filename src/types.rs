@@ -317,7 +317,7 @@ impl AgentAnnouncement {
         );
         self.metadata.insert(
             AGENT_SIGNATURE_METADATA_KEY.to_owned(),
-            self.shared_secret_signature(auth.secret()),
+            self.shared_secret_signature(auth.signing_secret()),
         );
     }
 
@@ -326,11 +326,20 @@ impl AgentAnnouncement {
     /// # Errors
     /// Returns [`ZeroConfError`] when required auth metadata is missing or invalid.
     pub fn verify_shared_secret_auth(&self, auth: &SharedSecretAuth) -> Result<(), ZeroConfError> {
-        let _scheme = required_auth_metadata(&self.metadata, AGENT_AUTH_SCHEME_METADATA_KEY)?;
+        let scheme = required_auth_metadata(&self.metadata, AGENT_AUTH_SCHEME_METADATA_KEY)?;
         let signature = required_auth_metadata(&self.metadata, AGENT_SIGNATURE_METADATA_KEY)?;
-        let expected = self.shared_secret_signature(auth.secret());
 
-        if signature == expected {
+        if scheme != "shared_secret_hmac_sha256" {
+            return Err(ZeroConfError::InvalidAuthScheme {
+                value: scheme.to_owned(),
+            });
+        }
+
+        if auth
+            .verification_secrets()
+            .iter()
+            .any(|secret| signature == self.shared_secret_signature(secret))
+        {
             Ok(())
         } else {
             Err(ZeroConfError::InvalidSharedSecretSignature {
@@ -962,6 +971,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_announcement_should_accept_rotated_verification_secret() {
+        let mut announcement = announcement();
+        let old_auth = SharedSecretAuth::new("old-secret", SharedSecretMode::SignAndVerify)
+            .expect("auth should be valid");
+        let rotated_auth = SharedSecretAuth::with_rotation(
+            "new-secret",
+            ["old-secret"],
+            SharedSecretMode::SignAndVerify,
+        )
+        .expect("rotated auth should be valid");
+
+        announcement.apply_shared_secret_auth(&old_auth);
+        announcement
+            .verify_shared_secret_auth(&rotated_auth)
+            .expect("old signed announcement should still verify during rotation");
+    }
+
+    #[test]
     fn agent_announcement_should_reject_reserved_metadata_keys() {
         let mut announcement = announcement();
 
@@ -1027,5 +1054,26 @@ mod tests {
             err,
             ZeroConfError::InvalidSharedSecretSignature { agent_id } if agent_id == "agent-1"
         ));
+    }
+
+    #[test]
+    fn agent_announcement_should_reject_invalid_auth_scheme() {
+        let mut announcement = announcement();
+        let auth = SharedSecretAuth::new("top-secret", SharedSecretMode::SignAndVerify)
+            .expect("auth should be valid");
+
+        announcement.metadata.insert(
+            AGENT_AUTH_SCHEME_METADATA_KEY.to_owned(),
+            "unknown".to_owned(),
+        );
+        announcement
+            .metadata
+            .insert(AGENT_SIGNATURE_METADATA_KEY.to_owned(), "bogus".to_owned());
+
+        let err = announcement
+            .verify_shared_secret_auth(&auth)
+            .expect_err("unexpected scheme should fail");
+
+        assert!(matches!(err, ZeroConfError::InvalidAuthScheme { value } if value == "unknown"));
     }
 }

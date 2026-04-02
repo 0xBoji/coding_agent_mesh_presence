@@ -13,6 +13,13 @@ use crate::{
     types::{AgentMetadata, AgentStatus, canonicalize_capabilities},
 };
 
+#[derive(Debug, Clone)]
+struct SharedSecretBuilderConfig {
+    signing_secret: String,
+    verification_secrets: Vec<String>,
+    mode: SharedSecretMode,
+}
+
 /// Builder for constructing a [`ZeroConfMesh`] instance.
 ///
 /// # Example
@@ -51,7 +58,7 @@ pub struct ZeroConfMeshBuilder {
     capabilities: Vec<String>,
     enabled_interfaces: Vec<NetworkInterface>,
     disabled_interfaces: Vec<NetworkInterface>,
-    shared_secret_auth: Option<(String, SharedSecretMode)>,
+    shared_secret_auth: Option<SharedSecretBuilderConfig>,
 }
 
 impl Default for ZeroConfMeshBuilder {
@@ -204,7 +211,11 @@ impl ZeroConfMeshBuilder {
     /// Enables shared-secret signing and verification for mesh announcements.
     #[must_use]
     pub fn shared_secret(mut self, secret: impl Into<String>) -> Self {
-        self.shared_secret_auth = Some((secret.into(), SharedSecretMode::SignAndVerify));
+        self.shared_secret_auth = Some(SharedSecretBuilderConfig {
+            signing_secret: secret.into(),
+            verification_secrets: Vec::new(),
+            mode: SharedSecretMode::SignAndVerify,
+        });
         self
     }
 
@@ -217,7 +228,53 @@ impl ZeroConfMeshBuilder {
         secret: impl Into<String>,
         mode: SharedSecretMode,
     ) -> Self {
-        self.shared_secret_auth = Some((secret.into(), mode));
+        self.shared_secret_auth = Some(SharedSecretBuilderConfig {
+            signing_secret: secret.into(),
+            verification_secrets: Vec::new(),
+            mode,
+        });
+        self
+    }
+
+    /// Enables shared-secret authentication with rotation-aware verification.
+    ///
+    /// The signing secret is used for local announcements; the provided
+    /// verification secrets are additionally accepted for incoming peers.
+    #[must_use]
+    pub fn shared_secret_rotation<I, S>(
+        mut self,
+        signing_secret: impl Into<String>,
+        verification_secrets: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.shared_secret_auth = Some(SharedSecretBuilderConfig {
+            signing_secret: signing_secret.into(),
+            verification_secrets: verification_secrets.into_iter().map(Into::into).collect(),
+            mode: SharedSecretMode::SignAndVerify,
+        });
+        self
+    }
+
+    /// Enables shared-secret authentication with rotation-aware verification and an explicit mode.
+    #[must_use]
+    pub fn shared_secret_rotation_with_mode<I, S>(
+        mut self,
+        signing_secret: impl Into<String>,
+        verification_secrets: I,
+        mode: SharedSecretMode,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.shared_secret_auth = Some(SharedSecretBuilderConfig {
+            signing_secret: signing_secret.into(),
+            verification_secrets: verification_secrets.into_iter().map(Into::into).collect(),
+            mode,
+        });
         self
     }
 
@@ -256,8 +313,14 @@ impl ZeroConfMeshBuilder {
             .with_enabled_interfaces(self.enabled_interfaces)
             .with_disabled_interfaces(self.disabled_interfaces);
 
-        if let Some((secret, mode)) = self.shared_secret_auth {
-            Ok(config.with_shared_secret_auth(SharedSecretAuth::new(secret, mode)?))
+        if let Some(auth) = self.shared_secret_auth {
+            Ok(
+                config.with_shared_secret_auth(SharedSecretAuth::with_rotation(
+                    auth.signing_secret,
+                    auth.verification_secrets,
+                    auth.mode,
+                )?),
+            )
         } else {
             Ok(config)
         }
@@ -366,6 +429,7 @@ mod tests {
             .shared_secret_auth()
             .expect("shared secret auth should be present");
         assert_eq!(auth.mode(), SharedSecretMode::SignAndVerify);
+        assert_eq!(auth.verification_secrets(), &["top-secret".to_owned()]);
     }
 
     #[test]
@@ -381,6 +445,28 @@ mod tests {
             .expect_err("empty shared secret should be rejected");
 
         assert!(matches!(err, ZeroConfError::EmptySharedSecret));
+    }
+
+    #[test]
+    fn builder_should_embed_rotation_aware_shared_secret_auth_in_config() {
+        let config = ZeroConfMesh::builder()
+            .agent_id("agent-1")
+            .role("reviewer")
+            .project("alpha")
+            .branch("main")
+            .port(8080)
+            .shared_secret_rotation("new-secret", ["old-secret"])
+            .build_config()
+            .expect("config should build");
+
+        let auth = config
+            .shared_secret_auth()
+            .expect("shared secret auth should be present");
+        assert_eq!(auth.mode(), SharedSecretMode::SignAndVerify);
+        assert_eq!(
+            auth.verification_secrets(),
+            &["new-secret".to_owned(), "old-secret".to_owned()]
+        );
     }
 
     #[test]

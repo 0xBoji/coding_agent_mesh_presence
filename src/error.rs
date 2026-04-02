@@ -90,6 +90,12 @@ pub enum ZeroConfError {
         /// The missing authentication key.
         key: &'static str,
     },
+    /// A discovered peer advertised an unknown authentication scheme.
+    #[error("invalid authentication scheme `{value}`; expected `shared_secret_hmac_sha256`")]
+    InvalidAuthScheme {
+        /// The unexpected auth scheme value.
+        value: String,
+    },
     /// Shared-secret verification failed for a discovered announcement.
     #[error("shared-secret verification failed for agent `{agent_id}`")]
     InvalidSharedSecretSignature {

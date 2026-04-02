@@ -33,14 +33,19 @@ pub enum SharedSecretMode {
 /// Optional shared-secret authentication settings for LAN announcements.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SharedSecretAuth {
-    secret: String,
+    signing_secret: String,
+    verification_secrets: Vec<String>,
     mode: SharedSecretMode,
 }
 
 impl std::fmt::Debug for SharedSecretAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharedSecretAuth")
-            .field("secret", &"<redacted>")
+            .field("signing_secret", &"<redacted>")
+            .field(
+                "verification_secret_count",
+                &self.verification_secrets.len(),
+            )
             .field("mode", &self.mode)
             .finish()
     }
@@ -52,8 +57,46 @@ impl SharedSecretAuth {
     /// # Errors
     /// Returns [`ZeroConfError`] when the secret is empty after trimming.
     pub fn new(secret: impl Into<String>, mode: SharedSecretMode) -> Result<Self, ZeroConfError> {
+        let signing_secret = normalize_shared_secret(secret.into())?;
         Ok(Self {
-            secret: normalize_shared_secret(secret.into())?,
+            verification_secrets: vec![signing_secret.clone()],
+            signing_secret,
+            mode,
+        })
+    }
+
+    /// Creates shared-secret authentication with explicit rotation support.
+    ///
+    /// The first secret is used for signing local announcements; all provided
+    /// secrets, plus the signing secret, are accepted for remote verification.
+    ///
+    /// # Errors
+    /// Returns [`ZeroConfError`] when any secret is empty after trimming.
+    pub fn with_rotation<I, S>(
+        signing_secret: impl Into<String>,
+        verification_secrets: I,
+        mode: SharedSecretMode,
+    ) -> Result<Self, ZeroConfError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let signing_secret = normalize_shared_secret(signing_secret.into())?;
+        let mut normalized = verification_secrets
+            .into_iter()
+            .map(|secret| normalize_shared_secret(secret.into()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !normalized.iter().any(|secret| secret == &signing_secret) {
+            normalized.push(signing_secret.clone());
+        }
+
+        normalized.sort();
+        normalized.dedup();
+
+        Ok(Self {
+            signing_secret,
+            verification_secrets: normalized,
             mode,
         })
     }
@@ -70,8 +113,14 @@ impl SharedSecretAuth {
         matches!(self.mode, SharedSecretMode::SignAndVerify)
     }
 
-    pub(crate) fn secret(&self) -> &str {
-        &self.secret
+    pub(crate) fn signing_secret(&self) -> &str {
+        &self.signing_secret
+    }
+
+    /// Returns the accepted verification secrets for incoming peers.
+    #[must_use]
+    pub fn verification_secrets(&self) -> &[String] {
+        &self.verification_secrets
     }
 }
 

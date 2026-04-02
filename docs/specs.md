@@ -213,6 +213,8 @@ Current builder setters:
 - `disable_interface(...)`
 - `shared_secret(...)`
 - `shared_secret_with_mode(...)`
+- `shared_secret_rotation(...)`
+- `shared_secret_rotation_with_mode(...)`
 - `metadata(key, value)`
 - `metadata_map(...)`
 - `build().await`
@@ -307,6 +309,7 @@ Semantics:
 - reserved canonical metadata keys used with generic metadata updaters,
 - missing required TXT properties,
 - missing authentication metadata for verified peers,
+- invalid authentication scheme metadata,
 - invalid TXT property encoding,
 - invalid status strings,
 - invalid shared-secret signatures,
@@ -389,6 +392,7 @@ Scenarios:
 - local typed capability update propagation,
 - shared-secret verified discovery between signed peers,
 - unsigned peers being ignored when verification is enabled,
+- rotated shared secrets being accepted during key transition windows,
 - discovery between two mesh nodes on the same custom mDNS port,
 - remote peer status update propagation after a local status change,
 - remote peer project/branch/metadata update propagation after a local runtime change,
@@ -428,7 +432,7 @@ To keep the suite reliable:
 
 ## 10. Future Work
 - richer status vocabularies or user-defined states,
-- stronger authentication options such as asymmetric signatures or key rotation,
+- stronger authentication options such as asymmetric signatures,
 - encrypted metadata payloads,
 - leader election or higher-level coordination protocols,
 - richer authorization policies on top of shared-secret verification.

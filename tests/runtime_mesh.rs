@@ -6,8 +6,9 @@ use std::{
     time::Duration,
 };
 
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use tokio::time;
-use zero_conf_mesh::{AgentStatus, ZeroConfMesh};
+use zero_conf_mesh::{AgentStatus, DEFAULT_SERVICE_TYPE, ZeroConfMesh};
 
 #[tokio::test]
 async fn mesh_should_propagate_status_updates_to_remote_peers() -> Result<(), Box<dyn Error>> {
@@ -127,6 +128,48 @@ async fn mesh_should_filter_projects_independently_on_shared_lan() -> Result<(),
     Ok(())
 }
 
+#[tokio::test]
+async fn mesh_should_ignore_remote_services_with_malformed_txt_payloads()
+-> Result<(), Box<dyn Error>> {
+    let mdns_port = available_udp_port();
+    let listener_mesh = mesh("agent-listener", "alpha", "main", 8081, mdns_port).await?;
+    let valid_mesh = mesh("agent-valid", "alpha", "main", 8082, mdns_port).await?;
+
+    let invalid_daemon = ServiceDaemon::new_with_port(mdns_port)?;
+    let invalid_service = ServiceInfo::new(
+        DEFAULT_SERVICE_TYPE,
+        "agent-invalid",
+        "agent-invalid.local.",
+        "",
+        8083,
+        &[
+            ("agent_id", "agent-invalid"),
+            ("role", "worker"),
+            ("current_branch", "main"),
+            ("status", "busy"),
+        ][..],
+    )?
+    .enable_addr_auto();
+    let invalid_fullname = invalid_service.get_fullname().to_string();
+    invalid_daemon.register(invalid_service)?;
+
+    wait_for_agent(&listener_mesh, "agent-valid").await?;
+    wait_for_agent_to_remain_absent(&listener_mesh, "agent-invalid", Duration::from_secs(2))
+        .await?;
+
+    assert_eq!(
+        ids(&listener_mesh.agents().await),
+        vec!["agent-listener", "agent-valid"]
+    );
+
+    unregister_service(&invalid_daemon, &invalid_fullname).await;
+    let _ = invalid_daemon.shutdown();
+    listener_mesh.shutdown().await?;
+    valid_mesh.shutdown().await?;
+
+    Ok(())
+}
+
 async fn mesh(
     agent_id: &str,
     project: &str,
@@ -198,8 +241,31 @@ async fn wait_for_registry_size(
     Err(format!("timed out waiting for registry size {expected}").into())
 }
 
+async fn wait_for_agent_to_remain_absent(
+    mesh: &ZeroConfMesh,
+    agent_id: &str,
+    duration: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = time::Instant::now() + duration;
+    while time::Instant::now() < deadline {
+        if mesh.get_agent(agent_id).await.is_some() {
+            return Err(format!("agent `{agent_id}` should have been ignored").into());
+        }
+
+        time::sleep(Duration::from_millis(100)).await;
+    }
+
+    Ok(())
+}
+
 fn ids(agents: &[zero_conf_mesh::AgentInfo]) -> Vec<&str> {
     agents.iter().map(|agent| agent.id()).collect()
+}
+
+async fn unregister_service(daemon: &ServiceDaemon, fullname: &str) {
+    if let Ok(receiver) = daemon.unregister(fullname) {
+        let _ = receiver.recv_async().await;
+    }
 }
 
 fn available_udp_port() -> u16 {

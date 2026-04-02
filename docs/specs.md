@@ -354,7 +354,8 @@ Scenarios:
 - remote peer status update propagation after a local status change,
 - remote peer project/branch/metadata update propagation after a local runtime change,
 - multi-peer discovery on the same custom mDNS port,
-- project isolation via query helpers on a shared LAN.
+- project isolation via query helpers on a shared LAN,
+- malformed remote TXT payloads being ignored by the listener.
 
 ### 9.3 Failure Simulation
 Crash-like behavior is simulated by inserting peers with stale `last_seen` timestamps and running eviction logic directly. This avoids flaky host-network assumptions while still validating stale-node cleanup behavior.
@@ -372,7 +373,6 @@ In practice, the project should keep passing:
 
 ### 9.5 Tests That Should Be Added Next
 The current suite is good for the present slice, but the next implementation steps should add:
-- listener tests for malformed remote TXT payloads being ignored,
 - broadcaster tests for repeated re-registration after local status changes,
 - failure-path startup tests asserting partially initialized runtimes clean up local registration,
 - event-subscriber lag/drop tests around the broadcast channel's best-effort semantics.

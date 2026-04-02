@@ -217,7 +217,8 @@ Current automated coverage includes:
 - remote status propagation after local updates,
 - remote project/branch/metadata propagation after local updates,
 - multi-peer discovery on one custom mDNS port,
-- project isolation across shared-LAN discovery.
+- project isolation across shared-LAN discovery,
+- malformed remote TXT payloads being ignored.
 
 ## Runtime Updates
 
